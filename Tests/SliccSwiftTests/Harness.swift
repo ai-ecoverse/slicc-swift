@@ -56,7 +56,7 @@ func compress(_ input: [UInt8], windowBits: Int32) -> [UInt8] {
   deflateInit2_(
     &stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, windowBits, 8, Z_DEFAULT_STRATEGY, zlibVersion(),
     Int32(MemoryLayout<z_stream>.size))
-  var output = [UInt8](repeating: 0, count: input.count + 128)
+  var output = [UInt8](repeating: 0, count: input.count + 1024)
   var source = input
   let produced = source.withUnsafeMutableBufferPointer { inBuf in
     output.withUnsafeMutableBufferPointer { outBuf in
@@ -128,6 +128,10 @@ func upstreamRouter() -> Router<BasicRequestContext> {
       body: ResponseBody(asyncSequence: chunks)
     )
   }
+  router.get("bomb") { _, _ in encoded("gzip", gzip([UInt8](repeating: 0, count: 64 * 1024 * 1024)))
+  }
+  router.get("padded") { _, _ in encoded("gzip", gzippedText + [0, 0, 0]) }
+  router.get("garbage") { _, _ in encoded("gzip", gzippedText + Array("junk".utf8)) }
   router.get("x-gzip") { _, _ in encoded("x-gzip", gzippedText) }
   router.get("members") { _, _ in
     encoded("gzip", gzippedText + gzip(Array(" and more".utf8)))

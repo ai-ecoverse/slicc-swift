@@ -117,7 +117,8 @@ import Testing
 
   @Test(arguments: [
     ("/gzip", "compressed hello"), ("/x-gzip", "compressed hello"),
-    ("/members", "compressed hello and more"), ("/deflate", "zlib hello"),
+    ("/members", "compressed hello and more"), ("/padded", "compressed hello"),
+    ("/deflate", "zlib hello"),
     ("/raw-deflate", "raw hello"), ("/br", "brotli hello"), ("/stacked", "stacked hello"),
   ])
   func everyCodingIsDecoded(path: String, text: String) async throws {
@@ -127,6 +128,34 @@ import Testing
       #expect(reply.text == text)
       #expect(reply.values("content-encoding").isEmpty)
       #expect(reply.values("content-length").isEmpty)
+    }
+  }
+
+  @Test func decompressionStreamsInBoundedChunks() async throws {
+    try await withHarness { harness in
+      let head = rawHead(harness.upstream + "/bomb")
+      var request = HTTPClientRequest(url: harness.proxy + RawFetchProtocol.path)
+      request.method = .POST
+      request.headers.add(name: "Origin", value: hostedOrigin)
+      request.headers.add(name: ProxySecurity.keyHeader, value: testKey)
+      request.headers.add(name: RawFetchProtocol.requestHeader, value: head)
+      let response = try await harness.client.execute(request, timeout: .seconds(60))
+      var total = 0
+      var largest = 0
+      for try await chunk in response.body {
+        total += chunk.readableBytes
+        largest = max(largest, chunk.readableBytes)
+      }
+      #expect(total > 64 * 1024 * 1024)
+      #expect(largest <= 1024 * 1024)
+    }
+  }
+
+  @Test func garbageAfterGzipFailsTheBody() async throws {
+    try await withHarness { harness in
+      await #expect(throws: (any Error).self) {
+        _ = try await harness.fetch("/garbage")
+      }
     }
   }
 

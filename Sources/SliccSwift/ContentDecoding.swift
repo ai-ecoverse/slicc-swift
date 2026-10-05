@@ -8,10 +8,42 @@ enum ContentDecodingError: Error {
   case zlib(Int32)
   case brotli
   case truncated
+  case trailingData
 }
 
-protocol ContentDecoder: AnyObject {
-  func push(_ input: [UInt8], finish: Bool) throws -> [UInt8]
+class ContentDecoder {
+  static let chunkSize = 64 * 1024
+
+  private var input: [UInt8] = []
+  private var offset = 0
+
+  var available: Int { input.count - offset }
+
+  func feed(_ bytes: [UInt8]) {
+    input = offset == input.count ? bytes : Array(input[offset...]) + bytes
+    offset = 0
+  }
+
+  func peek(_ index: Int) -> UInt8 { input[offset + index] }
+
+  func consume(_ count: Int) {
+    offset += count
+    if offset == input.count {
+      input = []
+      offset = 0
+    }
+  }
+
+  func withInput<T>(_ body: (UnsafeMutablePointer<UInt8>, Int) throws -> T) rethrows -> T {
+    var placeholder: UInt8 = 0
+    if available == 0 { return try body(&placeholder, 0) }
+    let start = offset
+    return try input.withUnsafeMutableBufferPointer {
+      try body($0.baseAddress! + start, $0.count - start)
+    }
+  }
+
+  func read(finish: Bool) throws -> [UInt8] { [] }
 }
 
 final class ZlibDecoder: ContentDecoder {
@@ -19,7 +51,6 @@ final class ZlibDecoder: ContentDecoder {
   private var stream = z_stream()
   private var started = false
   private var ended = false
-  private var pending: [UInt8] = []
 
   init(gzip: Bool) {
     self.gzip = gzip
@@ -29,69 +60,58 @@ final class ZlibDecoder: ContentDecoder {
     if started { inflateEnd(&stream) }
   }
 
-  func push(_ input: [UInt8], finish: Bool) throws -> [UInt8] {
-    if !started {
-      pending += input
-      if pending.count < 2 && !finish { return [] }
-      if pending.isEmpty { return [] }
-      try start(windowBits: windowBits(for: pending))
-      let buffered = pending
-      pending = []
-      return try inflate(buffered, finish: finish)
-    }
-    return try inflate(input, finish: finish)
-  }
-
-  private func windowBits(for prefix: [UInt8]) -> Int32 {
+  private func windowBits() -> Int32 {
     if gzip { return 31 }
-    guard prefix.count >= 2 else { return -15 }
-    let header = Int(prefix[0]) << 8 | Int(prefix[1])
-    return prefix[0] & 0x0f == 8 && header % 31 == 0 ? 15 : -15
+    guard available >= 2 else { return -15 }
+    let header = Int(peek(0)) << 8 | Int(peek(1))
+    return peek(0) & 0x0f == 8 && header % 31 == 0 ? 15 : -15
   }
 
-  private func start(windowBits: Int32) throws {
-    let rc = inflateInit2_(&stream, windowBits, zlibVersion(), Int32(MemoryLayout<z_stream>.size))
-    guard rc == Z_OK else { throw ContentDecodingError.zlib(rc) }
-    started = true
-  }
-
-  private func inflate(_ input: [UInt8], finish: Bool) throws -> [UInt8] {
-    var source = input
-    var output: [UInt8] = []
-    let chunk = 64 * 1024
-    var outbuf = [UInt8](repeating: 0, count: chunk)
-    try source.withUnsafeMutableBufferPointer { inBuf in
-      stream.next_in = inBuf.baseAddress
-      stream.avail_in = uInt(inBuf.count)
-      while true {
-        if ended {
-          guard gzip, stream.avail_in > 0, stream.next_in.pointee == 0x1f else {
-            stream.avail_in = 0
-            return
-          }
-          inflateReset(&stream)
-          ended = false
-        }
-        if stream.avail_in == 0 && !finish { return }
-        let rc = outbuf.withUnsafeMutableBufferPointer { dest -> Int32 in
-          stream.next_out = dest.baseAddress
-          stream.avail_out = uInt(dest.count)
-          return zlib.inflate(&stream, Z_NO_FLUSH)
-        }
-        let produced = chunk - Int(stream.avail_out)
-        if produced > 0 { output.append(contentsOf: outbuf[0..<produced]) }
-        if rc == Z_STREAM_END {
-          ended = true
-          continue
-        }
-        if rc == Z_BUF_ERROR || (rc == Z_OK && produced == 0 && stream.avail_in == 0) {
-          if finish { throw ContentDecodingError.truncated }
-          return
-        }
-        guard rc == Z_OK else { throw ContentDecodingError.zlib(rc) }
-      }
+  override func read(finish: Bool) throws -> [UInt8] {
+    if !started {
+      if available == 0 || (available < 2 && !finish) { return [] }
+      let rc = inflateInit2_(
+        &stream, windowBits(), zlibVersion(), Int32(MemoryLayout<z_stream>.size))
+      guard rc == Z_OK else { throw ContentDecodingError.zlib(rc) }
+      started = true
     }
-    return output
+    var output = [UInt8](repeating: 0, count: Self.chunkSize)
+    var produced = 0
+    while produced < output.count {
+      if ended {
+        while available > 0 && peek(0) == 0 { consume(1) }
+        if available == 0 { break }
+        guard gzip, peek(0) == 0x1f else { throw ContentDecodingError.trailingData }
+        inflateReset(&stream)
+        ended = false
+      }
+      if available == 0 && !finish { break }
+      let before = available
+      let room = output.count - produced
+      let rc = withInput { source, count in
+        output.withUnsafeMutableBufferPointer { dest in
+          stream.next_in = source
+          stream.avail_in = uInt(count)
+          stream.next_out = dest.baseAddress! + produced
+          stream.avail_out = uInt(room)
+          return inflate(&stream, Z_NO_FLUSH)
+        }
+      }
+      let consumed = before - Int(stream.avail_in)
+      let made = room - Int(stream.avail_out)
+      consume(consumed)
+      produced += made
+      if rc == Z_STREAM_END {
+        ended = true
+        continue
+      }
+      if rc == Z_BUF_ERROR || (rc == Z_OK && made == 0 && consumed == 0) {
+        if finish && available == 0 { throw ContentDecodingError.truncated }
+        break
+      }
+      guard rc == Z_OK else { throw ContentDecodingError.zlib(rc) }
+    }
+    return Array(output[0..<produced])
   }
 }
 
@@ -99,12 +119,16 @@ final class BrotliDecoder: ContentDecoder {
   private let state = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
   private var ended = false
 
-  init() throws {
+  override init() {
+    super.init()
+  }
+
+  func start() throws {
     guard
       compression_stream_init(state, COMPRESSION_STREAM_DECODE, COMPRESSION_BROTLI)
         == COMPRESSION_STATUS_OK
     else {
-      state.deallocate()
+      ended = true
       throw ContentDecodingError.brotli
     }
   }
@@ -114,51 +138,52 @@ final class BrotliDecoder: ContentDecoder {
     state.deallocate()
   }
 
-  func push(_ input: [UInt8], finish: Bool) throws -> [UInt8] {
+  override func read(finish: Bool) throws -> [UInt8] {
     if ended { return [] }
-    var output: [UInt8] = []
-    let chunk = 64 * 1024
-    var outbuf = [UInt8](repeating: 0, count: chunk)
+    var output = [UInt8](repeating: 0, count: Self.chunkSize)
+    var produced = 0
     let flags = finish ? Int32(bitPattern: COMPRESSION_STREAM_FINALIZE.rawValue) : 0
-    try input.withUnsafeBufferPointer { inBuf in
-      let empty: [UInt8] = [0]
-      try empty.withUnsafeBufferPointer { placeholder in
-        state.pointee.src_ptr = inBuf.baseAddress ?? placeholder.baseAddress!
-        state.pointee.src_size = inBuf.count
-        while true {
-          let status = outbuf.withUnsafeMutableBufferPointer { dest -> compression_status in
-            state.pointee.dst_ptr = dest.baseAddress!
-            state.pointee.dst_size = dest.count
-            return compression_stream_process(state, flags)
-          }
-          let produced = chunk - state.pointee.dst_size
-          if produced > 0 { output.append(contentsOf: outbuf[0..<produced]) }
-          switch status {
-          case COMPRESSION_STATUS_END:
-            ended = true
-            return
-          case COMPRESSION_STATUS_OK:
-            if produced == 0 && state.pointee.src_size == 0 {
-              if finish { throw ContentDecodingError.truncated }
-              return
-            }
-          default:
-            throw ContentDecodingError.brotli
-          }
+    while produced < output.count {
+      if available == 0 && !finish { break }
+      let before = available
+      let room = output.count - produced
+      let status = withInput { source, count in
+        output.withUnsafeMutableBufferPointer { dest in
+          state.pointee.src_ptr = UnsafePointer(source)
+          state.pointee.src_size = count
+          state.pointee.dst_ptr = dest.baseAddress! + produced
+          state.pointee.dst_size = room
+          return compression_stream_process(state, flags)
         }
       }
+      let consumed = before - state.pointee.src_size
+      let made = room - state.pointee.dst_size
+      consume(consumed)
+      produced += made
+      if status == COMPRESSION_STATUS_END {
+        ended = true
+        break
+      }
+      guard status == COMPRESSION_STATUS_OK else { throw ContentDecodingError.brotli }
+      if made == 0 && consumed == 0 {
+        if finish { throw ContentDecodingError.truncated }
+        break
+      }
     }
-    return output
+    return Array(output[0..<produced])
   }
 }
 
 enum ContentDecoding {
-  static func decoders(for codings: [String]) throws -> [any ContentDecoder] {
-    try codings.reversed().map { coding -> any ContentDecoder in
+  static func decoders(for codings: [String]) throws -> [ContentDecoder] {
+    try codings.reversed().map { coding -> ContentDecoder in
       switch coding {
       case "gzip", "x-gzip": return ZlibDecoder(gzip: true)
       case "deflate": return ZlibDecoder(gzip: false)
-      default: return try BrotliDecoder()
+      default:
+        let decoder = BrotliDecoder()
+        try decoder.start()
+        return decoder
       }
     }
   }
@@ -172,24 +197,32 @@ struct DecodedBody: AsyncSequence, Sendable {
   struct AsyncIterator: AsyncIteratorProtocol {
     var inner: HTTPClientResponse.Body.AsyncIterator
     let codings: [String]
-    var decoders: [any ContentDecoder]?
-    var finished = false
+    var decoders: [ContentDecoder] = []
+    var inputDone: [Bool] = []
 
     mutating func next() async throws -> ByteBuffer? {
       if codings.isEmpty { return try await inner.next() }
-      if decoders == nil { decoders = try ContentDecoding.decoders(for: codings) }
-      while !finished {
-        guard let chunk = try await inner.next() else {
-          finished = true
-          var bytes: [UInt8] = []
-          for decoder in decoders ?? [] { bytes = try decoder.push(bytes, finish: true) }
-          return bytes.isEmpty ? nil : ByteBuffer(bytes: bytes)
-        }
-        var bytes = Array(chunk.readableBytesView)
-        for decoder in decoders ?? [] { bytes = try decoder.push(bytes, finish: false) }
-        if !bytes.isEmpty { return ByteBuffer(bytes: bytes) }
+      if decoders.isEmpty {
+        decoders = try ContentDecoding.decoders(for: codings)
+        inputDone = Array(repeating: false, count: decoders.count)
       }
-      return nil
+      return try await pull(decoders.count - 1).map { ByteBuffer(bytes: $0) }
+    }
+
+    private mutating func pull(_ stage: Int) async throws -> [UInt8]? {
+      let decoder = decoders[stage]
+      while true {
+        let output = try decoder.read(finish: inputDone[stage])
+        if !output.isEmpty { return output }
+        if inputDone[stage] { return nil }
+        let input: [UInt8]?
+        if stage == 0 {
+          input = try await inner.next().map { Array($0.readableBytesView) }
+        } else {
+          input = try await pull(stage - 1)
+        }
+        if let input { decoder.feed(input) } else { inputDone[stage] = true }
+      }
     }
   }
 
