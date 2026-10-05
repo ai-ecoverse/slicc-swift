@@ -23,6 +23,7 @@ let package = Package(
       name: "SliccSwift",
       dependencies: [
         .product(name: "Hummingbird", package: "hummingbird"),
+        .product(name: "HummingbirdCore", package: "hummingbird"),
         .product(name: "AsyncHTTPClient", package: "async-http-client"),
         .product(name: "Logging", package: "swift-log"),
         .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),

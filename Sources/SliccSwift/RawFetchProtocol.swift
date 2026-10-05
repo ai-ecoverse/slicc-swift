@@ -34,8 +34,9 @@ public enum RawFetchProtocol {
   public static let errorHeader = "X-Proxy-Error"
   public static let requestBodyCap = 256 * 1024 * 1024
 
-  static let decodedCodings: Set<String> = ["gzip", "deflate"]
-  static let acceptEncoding = "gzip, deflate"
+  public static let maxHeaderBytes = 1024 * 1024
+  static let decodedCodings: Set<String> = ["gzip", "x-gzip", "deflate", "br"]
+  static let acceptEncoding = "gzip, deflate, br"
 
   private static let requestSkipHeaders: Set<String> = [
     "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding",
@@ -85,60 +86,40 @@ public enum RawFetchProtocol {
     return ranged ? "identity" : acceptEncoding
   }
 
-  private static func codings(_ headers: RawHeaderList) -> [String] {
+  static func codings(_ headers: RawHeaderList) -> [String] {
     headers.filter { $0.name.lowercased() == "content-encoding" }
       .flatMap { $0.value.split(separator: ",") }
       .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-      .filter { !$0.isEmpty }
+      .filter { !$0.isEmpty && $0 != "identity" }
   }
 
-  static func codingsWereDecoded(_ headers: RawHeaderList, decodedCodings: Set<String>) -> Bool {
-    let listed = codings(headers).filter { $0 != "identity" }
-    return !listed.isEmpty && listed.allSatisfy { decodedCodings.contains($0) }
-  }
-
-  enum UpstreamDecoding: Equatable {
-    case untouched
-    case decoded
-    case partiallyDecoded
-  }
-
-  static func upstreamDecoding(_ headers: RawHeaderList) -> UpstreamDecoding {
+  static func isDecoded(_ headers: RawHeaderList) -> Bool {
     let listed = codings(headers)
-    guard let first = listed.first, decodedCodings.contains(first) else { return .untouched }
-    return listed.dropFirst().allSatisfy { $0 == "identity" } ? .decoded : .partiallyDecoded
+    return !listed.isEmpty && listed.allSatisfy { decodedCodings.contains($0) }
   }
 
   static func responseHasBody(method: String, status: Int) -> Bool {
     method.uppercased() != "HEAD" && !nullBodyStatuses.contains(status)
   }
 
-  static func isDecodedPartialResponse(
-    status: Int, headers: RawHeaderList, decodedCodings: Set<String>
-  ) -> Bool {
-    status == 206 && codingsWereDecoded(headers, decodedCodings: decodedCodings)
+  static func isDecodedPartial(status: Int, headers: RawHeaderList) -> Bool {
+    status == 206 && isDecoded(headers)
   }
 
-  static func responseHeaders(
-    method: String,
-    status: Int,
-    headers: RawHeaderList,
-    bodyRewritten: Bool,
-    decodedCodings: Set<String>
-  ) -> RawHeaderList {
+  static func responseHeaders(method: String, status: Int, headers: RawHeaderList) -> RawHeaderList
+  {
     let named = connectionTokens(headers)
-    let withoutHop = headers.filter {
+    let kept = headers.filter {
       let lower = $0.name.lowercased()
       return !responseSkipHeaders.contains(lower) && !named.contains(lower)
     }
-    guard responseHasBody(method: method, status: status) else { return withoutHop }
-    let encoding = withoutHop.filter { $0.name.lowercased() == "content-encoding" }
+    guard responseHasBody(method: method, status: status) else { return kept }
+    let encoding = kept.filter { $0.name.lowercased() == "content-encoding" }
       .map(\.value).joined(separator: ",")
-    let decoded = codingsWereDecoded(withoutHop, decodedCodings: decodedCodings)
-    let dropLength = decoded || bodyRewritten
-    return withoutHop.filter {
+    let decoded = isDecoded(kept)
+    return kept.filter {
       switch $0.name.lowercased() {
-      case "content-length": return !dropLength
+      case "content-length": return !decoded
       case "content-encoding":
         return !decoded && encoding.trimmingCharacters(in: .whitespaces).lowercased() != "identity"
       default: return true
@@ -210,6 +191,6 @@ public enum RawFetchProtocol {
   }
 
   static func probeReplyJSON(maxRequestBodyBytes: Int) -> String {
-    "{\"rawFetch\":\(protocolVersion),\"requestBodyStreaming\":true,\"maxRequestBodyBytes\":\(maxRequestBodyBytes)}"
+    "{\"rawFetch\":\(protocolVersion),\"requestBodyStreaming\":false,\"maxRequestBodyBytes\":\(maxRequestBodyBytes)}"
   }
 }

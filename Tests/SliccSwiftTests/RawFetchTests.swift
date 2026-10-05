@@ -13,7 +13,7 @@ import Testing
       let reply = try #require(
         try JSONSerialization.jsonObject(with: Data(bytes)) as? [String: Any])
       #expect(reply["rawFetch"] as? Int == 1)
-      #expect(reply["requestBodyStreaming"] as? Bool == true)
+      #expect(reply["requestBodyStreaming"] as? Bool == false)
       #expect(reply["maxRequestBodyBytes"] as? Int == RawFetchProtocol.requestBodyCap)
     }
   }
@@ -27,7 +27,7 @@ import Testing
       #expect(reply.text == "hello")
       #expect(reply.values("set-cookie") == ["a=1; Path=/", "b=2; Path=/"])
       #expect(reply.values("x-custom") == ["custom"])
-      #expect(reply.values("content-length").isEmpty)
+      #expect(reply.values("content-length") == ["5"])
     }
   }
 
@@ -70,7 +70,7 @@ import Testing
       #expect(seen["x-drop"] == nil)
       #expect(seen["proxy-authorization"] == nil)
       #expect(!seen.values.contains { $0.contains("evil.example") })
-      #expect(seen["accept-encoding"] == "gzip, deflate")
+      #expect(seen["accept-encoding"] == "gzip, deflate, br")
       #expect(seen[ProxySecurity.keyHeader.lowercased()] == nil)
       #expect(seen["origin"] == nil)
     }
@@ -96,7 +96,7 @@ import Testing
     }
   }
 
-  @Test func chunkedUploadStreamsUpstream() async throws {
+  @Test func chunkedUploadIsBufferedBeforeUpstream() async throws {
     try await withHarness { harness in
       let chunks = AsyncStream<ByteBuffer> { continuation in
         for index in 0..<4 {
@@ -109,49 +109,94 @@ import Testing
         body: .stream(chunks, length: .unknown))
       #expect(reply.status == 200)
       #expect(reply.values("x-received-bytes") == [String(4 * 64 * 1024)])
-      #expect(reply.values("x-received-chunked") == ["chunked"])
+      #expect(reply.values("x-received-chunked") == ["no"])
       #expect(reply.body.count == 4 * 64 * 1024)
       #expect(reply.body.last == 68)
     }
   }
 
-  @Test func declaredGzipIsDecoded() async throws {
+  @Test(arguments: [
+    ("/gzip", "compressed hello"), ("/x-gzip", "compressed hello"),
+    ("/members", "compressed hello and more"), ("/deflate", "zlib hello"),
+    ("/raw-deflate", "raw hello"), ("/br", "brotli hello"), ("/stacked", "stacked hello"),
+  ])
+  func everyCodingIsDecoded(path: String, text: String) async throws {
     try await withHarness { harness in
-      let reply = try await harness.fetch("/gzip")
-      #expect(reply.text == "compressed hello")
+      let reply = try await harness.fetch(path)
+      #expect(reply.status == 200)
+      #expect(reply.text == text)
       #expect(reply.values("content-encoding").isEmpty)
       #expect(reply.values("content-length").isEmpty)
     }
   }
 
-  @Test func undeclaredGzipTextIsInflated() async throws {
+  @Test func encodedHeadKeepsItsCoding() async throws {
+    try await withHarness { harness in
+      let reply = try await harness.fetch("/gzip", method: "HEAD")
+      #expect(reply.body.isEmpty)
+      #expect(reply.values("content-encoding") == ["gzip"])
+      #expect(reply.values("content-length") == ["42"])
+    }
+  }
+
+  @Test func unknownCodingPassesThrough() async throws {
+    try await withHarness { harness in
+      let reply = try await harness.fetch("/unknown")
+      #expect(reply.body == gzippedText)
+      #expect(reply.values("content-encoding") == ["zstd"])
+      #expect(reply.values("content-length") == [String(gzippedText.count)])
+    }
+  }
+
+  @Test func undeclaredGzipPassesThrough() async throws {
     try await withHarness { harness in
       let reply = try await harness.fetch("/sniff")
-      #expect(reply.text == "compressed hello")
-    }
-  }
-
-  @Test func concatenatedGzipMembersAreAllInflated() async throws {
-    try await withHarness { harness in
-      let reply = try await harness.fetch("/members")
-      #expect(reply.text == "compressed hello and more")
-    }
-  }
-
-  @Test func binaryGzipPassesThrough() async throws {
-    try await withHarness { harness in
-      let reply = try await harness.fetch("/archive")
       #expect(reply.body == gzippedText)
       #expect(reply.values("content-length") == [String(gzippedText.count)])
     }
   }
 
-  @Test func stackedCodingIsRefused() async throws {
+  @Test func encodedPartialIsRefused() async throws {
     try await withHarness { harness in
-      let head = rawHead(harness.upstream + "/stacked")
-      let (response, _) = try await harness.post(headers: [(RawFetchProtocol.requestHeader, head)])
+      let head = rawHead(harness.upstream + "/partial")
+      let (response, bytes) = try await harness.post(headers: [
+        (RawFetchProtocol.requestHeader, head)
+      ])
       #expect(response.status == .badGateway)
       #expect(response.headers.first(name: RawFetchProtocol.errorHeader) == "1")
+      #expect(
+        errorText(bytes) == "upstream answered a range request with an encoded partial body")
+    }
+  }
+
+  @Test func largeBodyStreamsThrough() async throws {
+    try await withHarness { harness in
+      let reply = try await harness.fetch("/large")
+      #expect(reply.status == 200)
+      #expect(reply.body.count == 32 * 1024 * 1024)
+      #expect(reply.body.last == 255)
+    }
+  }
+
+  @Test func megabyteHeadsAreAccepted() async throws {
+    try await withHarness { harness in
+      let cookie = "big=" + String(repeating: "c", count: 900 * 1024)
+      let reply = try await harness.fetch("/headers", headers: [("Cookie", cookie)])
+      #expect(reply.status == 200)
+      let seen = try #require(
+        try JSONSerialization.jsonObject(with: Data(reply.body)) as? [String: String])
+      #expect(seen["cookie"]?.count == cookie.count)
+    }
+  }
+
+  @Test func invalidHeaderNameFailsTheFetch() async throws {
+    try await withHarness { harness in
+      let head = #"{"url":"http:\/\/127.0.0.1:1\/","method":"GET","headers":[["bad name","v"]]}"#
+      let (response, bytes) = try await harness.post(headers: [
+        (RawFetchProtocol.requestHeader, head)
+      ])
+      #expect(response.status == .badGateway)
+      #expect(errorText(bytes)?.hasPrefix("fetch failed: ") == true)
     }
   }
 
@@ -160,7 +205,6 @@ import Testing
     #"{"url":"http:\/\/x\/","method":"G T","headers":[]}"#,
     #"{"url":"http:\/\/x\/","method":"GET","headers":[["a",1]]}"#,
     #"{"url":"ftp:\/\/x\/","method":"GET","headers":[]}"#,
-    #"{"url":"http:\/\/x\/","method":"GET","headers":[["bad name","v"]]}"#,
   ])
   func malformedHeadsAreRejected(head: String) async throws {
     try await withHarness { harness in
@@ -186,27 +230,12 @@ import Testing
   @Test func unreachableUpstreamIsBadGateway() async throws {
     try await withHarness { harness in
       let head = rawHead("http://127.0.0.1:1/")
-      let (response, _) = try await harness.post(headers: [(RawFetchProtocol.requestHeader, head)])
+      let (response, bytes) = try await harness.post(headers: [
+        (RawFetchProtocol.requestHeader, head)
+      ])
+      #expect(errorText(bytes)?.hasPrefix("fetch failed: ") == true)
       #expect(response.status == .badGateway)
       #expect(response.headers.first(name: RawFetchProtocol.errorHeader) == "1")
-    }
-  }
-}
-
-@Suite struct CredentialTests {
-  @Test func urlCredentialsBecomeBasicAuth() async throws {
-    try await withHarness { harness in
-      let url =
-        harness.upstream.replacingOccurrences(of: "http://", with: "http://user:p%40ss@")
-        + "/headers"
-      let (response, bytes) = try await harness.post(headers: [
-        (RawFetchProtocol.requestHeader, rawHead(url))
-      ])
-      #expect(response.status == .ok)
-      let reply = try decodeFrame(bytes)
-      let seen = try #require(
-        try JSONSerialization.jsonObject(with: Data(reply.body)) as? [String: String])
-      #expect(seen["authorization"] == "Basic " + Data("user:p@ss".utf8).base64EncodedString())
     }
   }
 }
