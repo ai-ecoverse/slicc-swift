@@ -1,0 +1,9 @@
+.Build/
+.swiftpm/
+Packages/
+*.xcodeproj
+DerivedData/
+node_modules/
+coverage/
+artifacts/
+Tests/Unit/

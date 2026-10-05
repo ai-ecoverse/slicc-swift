@@ -1,0 +1,22 @@
+{
+  "name": "slicc-swift",
+  "version": "0.0.0",
+  "private": true,
+  "description": "SLICC's Swift local proxy for macOS and iOS",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ai-ecoverse/slicc-swift.git"
+  },
+  "scripts": {
+    "lint": "slicc-lint && swift format lint --recursive Sources Tests Package.swift",
+    "format": "swift format --in-place --recursive Sources Tests Package.swift",
+    "test": "swift test",
+    "build": "swift build",
+    "release": "semantic-release"
+  },
+  "devDependencies": {
+    "@ai-ecoverse/slicc-shared-web": "1.3.0",
+    "semantic-release": "25.0.9"
+  }
+}
