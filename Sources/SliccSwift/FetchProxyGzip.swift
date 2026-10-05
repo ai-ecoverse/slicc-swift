@@ -22,12 +22,10 @@ enum FetchProxyGzipError: Error, Equatable {
 final class GzipInflater {
   private var stream = z_stream()
   private var started = false
-  private var ended = false
+  private var betweenMembers = false
 
   deinit {
-    if started, !ended {
-      inflateEnd(&stream)
-    }
+    if started { inflateEnd(&stream) }
   }
 
   func start() throws {
@@ -38,7 +36,6 @@ final class GzipInflater {
   }
 
   func push(_ input: [UInt8], finish: Bool) throws -> [UInt8] {
-    if ended { return [] }
     try start()
     if input.isEmpty && !finish { return [] }
     return try input.withUnsafeBufferPointer { buf in
@@ -54,6 +51,14 @@ final class GzipInflater {
     var outbuf = [UInt8](repeating: 0, count: chunk)
     let flush = finish ? Z_FINISH : Z_NO_FLUSH
     while true {
+      if betweenMembers {
+        guard stream.avail_in > 0, stream.next_in.pointee == FetchProxyGzip.magic0 else {
+          stream.avail_in = 0
+          break
+        }
+        inflateReset(&stream)
+        betweenMembers = false
+      }
       let rc = outbuf.withUnsafeMutableBufferPointer { dest -> Int32 in
         self.stream.next_out = dest.baseAddress
         self.stream.avail_out = uInt(dest.count)
@@ -64,10 +69,8 @@ final class GzipInflater {
         output.append(contentsOf: outbuf[0..<produced])
       }
       if rc == Z_STREAM_END {
-        ended = true
-        inflateEnd(&stream)
-        started = false
-        break
+        betweenMembers = true
+        continue
       }
       if rc == Z_BUF_ERROR && stream.avail_in == 0 && !finish {
         break

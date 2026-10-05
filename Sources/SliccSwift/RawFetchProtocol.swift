@@ -39,7 +39,7 @@ public enum RawFetchProtocol {
 
   private static let requestSkipHeaders: Set<String> = [
     "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding",
-    "upgrade", "host", "content-length", "accept-encoding", "expect",
+    "upgrade", "host", "content-length", "accept-encoding", "expect", "proxy-authorization",
   ]
   private static let responseSkipHeaders: Set<String> = [
     "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",

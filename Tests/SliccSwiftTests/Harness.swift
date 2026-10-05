@@ -108,6 +108,14 @@ func upstreamRouter() -> Router<BasicRequestContext> {
       body: .init(byteBuffer: ByteBuffer(bytes: gzippedText))
     )
   }
+  router.get("members") { _, _ in
+    Response(
+      status: .ok,
+      headers: [.contentType: "text/plain"],
+      body: .init(
+        byteBuffer: ByteBuffer(bytes: gzippedText + gzip(Array(" and more".utf8)) + [0, 0]))
+    )
+  }
   router.get("archive") { _, _ in
     Response(
       status: .ok,

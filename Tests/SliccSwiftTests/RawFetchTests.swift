@@ -58,6 +58,7 @@ import Testing
         headers: [
           ("User-Agent", "curl/8.0"), ("Cookie", "a=1"), ("cookie", "b=2"), ("X-Multi", "one"),
           ("x-multi", "two"), ("Connection", "x-drop"), ("X-Drop", "gone"),
+          ("Proxy-Authorization", "Basic c2VjcmV0"),
           ("Host", "evil.example"),
         ]
       )
@@ -67,6 +68,7 @@ import Testing
       #expect(seen["cookie"] == "a=1; b=2")
       #expect(seen["x-multi"] == "one, two")
       #expect(seen["x-drop"] == nil)
+      #expect(seen["proxy-authorization"] == nil)
       #expect(!seen.values.contains { $0.contains("evil.example") })
       #expect(seen["accept-encoding"] == "gzip, deflate")
       #expect(seen[ProxySecurity.keyHeader.lowercased()] == nil)
@@ -129,6 +131,13 @@ import Testing
     }
   }
 
+  @Test func concatenatedGzipMembersAreAllInflated() async throws {
+    try await withHarness { harness in
+      let reply = try await harness.fetch("/members")
+      #expect(reply.text == "compressed hello and more")
+    }
+  }
+
   @Test func binaryGzipPassesThrough() async throws {
     try await withHarness { harness in
       let reply = try await harness.fetch("/archive")
@@ -148,10 +157,10 @@ import Testing
 
   @Test(arguments: [
     "not json",
-    #"{"url":"http://x/","method":"G T","headers":[]}"#,
-    #"{"url":"http://x/","method":"GET","headers":[["a",1]]}"#,
-    #"{"url":"ftp://x/","method":"GET","headers":[]}"#,
-    #"{"url":"http://x/","method":"GET","headers":[["bad name","v"]]}"#,
+    #"{"url":"http:\/\/x\/","method":"G T","headers":[]}"#,
+    #"{"url":"http:\/\/x\/","method":"GET","headers":[["a",1]]}"#,
+    #"{"url":"ftp:\/\/x\/","method":"GET","headers":[]}"#,
+    #"{"url":"http:\/\/x\/","method":"GET","headers":[["bad name","v"]]}"#,
   ])
   func malformedHeadsAreRejected(head: String) async throws {
     try await withHarness { harness in
