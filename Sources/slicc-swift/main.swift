@@ -2,18 +2,16 @@ import Foundation
 import SliccSwift
 
 struct LauncherOptions {
-  var host = "127.0.0.1"
   var port = 0
   var page = LocalProxy.defaultPage
   var open = true
 
-  static let usage = "usage: slicc-swift [--host HOST] [--port PORT] [--page URL] [--no-open]"
+  static let usage = "usage: slicc-swift [--port PORT] [--page URL] [--no-open]"
 
   init(_ arguments: [String]) throws {
     var rest = arguments[...]
     while let argument = rest.popFirst() {
       switch argument {
-      case "--host": host = try Self.value(argument, &rest)
       case "--port":
         guard let parsed = Int(try Self.value(argument, &rest)), (0...65535).contains(parsed) else {
           throw LauncherError.usage("--port needs a number from 0 to 65535")
@@ -58,7 +56,7 @@ do {
   exit(2)
 }
 
-let proxy = LocalProxy(host: options.host, port: options.port)
+let proxy = LocalProxy(port: options.port)
 try await proxy.run { proxyURL in
   let launch = LocalProxy.launchURL(page: options.page, proxyURL: proxyURL, key: proxy.key)
   print("slicc-swift proxy on \(proxyURL)")

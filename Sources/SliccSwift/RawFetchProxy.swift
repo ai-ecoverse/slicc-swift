@@ -11,12 +11,11 @@ struct RawFetchProxy: Sendable {
 
   private static let requestHeader = HTTPField.Name(RawFetchProtocol.requestHeader)!
   private static let probeHeader = HTTPField.Name(RawFetchProtocol.probeHeader)!
-  private static let transferEncoding = HTTPField.Name("Transfer-Encoding")!
   private static let upstreamTimeout: TimeAmount = .hours(24)
 
   static func makeHTTPClient() -> HTTPClient {
     var configuration = HTTPClient.Configuration()
-    configuration.decompression = .enabled(limit: .none)
+    configuration.decompression = .disabled
     configuration.redirectConfiguration = .disallow
     configuration.connectionPool.retryConnectionEstablishment = false
     configuration.networkFrameworkWaitForConnectivity = false
@@ -25,27 +24,26 @@ struct RawFetchProxy: Sendable {
 
   func respond(to request: Request) async throws -> Response {
     guard let encodedHead = request.headers[Self.requestHeader] else {
-      if request.headers[Self.probeHeader] != nil { return try probeResponse() }
+      if request.headers[Self.probeHeader] != nil { return probeResponse() }
       return try rawProxyError(
-        status: .badRequest,
-        message: "missing \(RawFetchProtocol.requestHeader) header"
-      )
+        status: .badRequest, message: "missing \(RawFetchProtocol.requestHeader) header")
     }
-    return try await relay(request, encodedHead: encodedHead)
+    do {
+      return try await relay(request, encodedHead: encodedHead)
+    } catch let refusal as Refusal {
+      var response = try rawProxyError(status: refusal.status, message: refusal.message)
+      if refusal.status == .contentTooLarge { response.headers[.connection] = "close" }
+      return response
+    }
   }
 
-  private func probeResponse() throws -> Response {
+  private func probeResponse() -> Response {
     let json = RawFetchProtocol.probeReplyJSON(maxRequestBodyBytes: maxRequestBodyBytes)
     return Response(
       status: .ok,
-      headers: [.contentType: "application/json; charset=utf-8", .cacheControl: "no-store"],
+      headers: [.contentType: "application/json", .cacheControl: "no-store"],
       body: .init(byteBuffer: ByteBuffer(string: json))
     )
-  }
-
-  private enum Upload {
-    case buffered(ByteBuffer)
-    case streamed(RequestBody, declaredLength: Int?)
   }
 
   private struct Refusal: Error {
@@ -54,94 +52,63 @@ struct RawFetchProxy: Sendable {
   }
 
   private func relay(_ request: Request, encodedHead: String) async throws -> Response {
-    do {
-      guard let head = RawFetchProtocol.decodeRequestHead(encodedHead) else {
-        throw Refusal(
-          status: .badRequest, message: "Malformed \(RawFetchProtocol.requestHeader) header")
-      }
-      let upstreamRequest = try await prepareUpstream(request, head: head)
-      let upstream: HTTPClientResponse
-      do {
-        upstream = try await httpClient.execute(upstreamRequest, timeout: Self.upstreamTimeout)
-      } catch {
-        throw Refusal(status: .badGateway, message: "Proxy fetch failed: \(error)")
-      }
-      return try frame(upstream, for: head)
-    } catch let refusal as Refusal {
-      var response = try rawProxyError(status: refusal.status, message: refusal.message)
-      if refusal.status == .contentTooLarge { response.headers[.connection] = "close" }
-      return response
+    guard let head = RawFetchProtocol.decodeRequestHead(encodedHead), Self.isHTTPURL(head.url)
+    else {
+      throw Refusal(
+        status: .badRequest, message: "malformed \(RawFetchProtocol.requestHeader) header")
     }
+    let body = try await readBody(request)
+    var upstreamRequest = HTTPClientRequest(url: head.url)
+    upstreamRequest.method = HTTPMethod(rawValue: head.method)
+    upstreamRequest.headers = try upstreamHeaders(head)
+    let method = head.method.uppercased()
+    if body.readableBytes > 0, method != "GET", method != "HEAD" {
+      upstreamRequest.body = .bytes(body)
+    }
+    let upstream: HTTPClientResponse
+    do {
+      upstream = try await httpClient.execute(upstreamRequest, timeout: Self.upstreamTimeout)
+    } catch {
+      throw Refusal(status: .badGateway, message: "fetch failed: \(error)")
+    }
+    return try frame(upstream, for: head)
   }
 
-  private func prepareUpstream(_ request: Request, head: RawFetchRequestHead) async throws
-    -> HTTPClientRequest
-  {
-    guard var target = URLComponents(string: head.url), let scheme = target.scheme?.lowercased(),
-      scheme == "http" || scheme == "https", target.host?.isEmpty == false
-    else {
-      throw Refusal(status: .badRequest, message: "Unsupported URL \"\(head.url)\"")
-    }
-    let credentials = target.user.map { user in "\(user):\(target.password ?? "")" }
-    target.user = nil
-    target.password = nil
+  private static func isHTTPURL(_ url: String) -> Bool {
+    guard let components = URLComponents(string: url),
+      let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
+      components.host?.isEmpty == false
+    else { return false }
+    return true
+  }
+
+  private func upstreamHeaders(_ head: RawFetchRequestHead) throws -> HTTPHeaders {
     let folded = RawFetchProtocol.foldRequestHeaders(
       RawFetchProtocol.stripRequestHeaders(head.headers))
     var headers = HTTPHeaders()
     for pair in folded {
-      guard HTTPField.Name(pair.name) != nil else {
-        throw Refusal(status: .badRequest, message: "Invalid header name \"\(pair.name)\"")
+      guard HTTPField.Name(pair.name) != nil, HTTPField.isValidValue(pair.value) else {
+        throw Refusal(status: .badGateway, message: "fetch failed: invalid header \"\(pair.name)\"")
       }
       headers.add(name: pair.name, value: pair.value)
     }
-    headers.replaceOrAdd(
-      name: "accept-encoding", value: RawFetchProtocol.acceptEncoding(for: folded))
-
-    if let credentials, !headers.contains(name: "authorization") {
-      headers.add(
-        name: "authorization", value: "Basic " + Data(credentials.utf8).base64EncodedString())
-    }
-
-    var upstream = HTTPClientRequest(url: target.string ?? head.url)
-    upstream.method = HTTPMethod(rawValue: head.method)
-    upstream.headers = headers
-    switch try await readUpload(request, head: head) {
-    case .streamed(let body, let declaredLength):
-      upstream.body = .stream(body, length: declaredLength.map { .known(Int64($0)) } ?? .unknown)
-    case .buffered(let body):
-      let method = head.method.uppercased()
-      if method != "GET", method != "HEAD", body.readableBytes > 0 { upstream.body = .bytes(body) }
-    }
-    return upstream
+    headers.add(name: "accept-encoding", value: RawFetchProtocol.acceptEncoding(for: folded))
+    return headers
   }
 
-  private func readUpload(_ request: Request, head: RawFetchRequestHead) async throws -> Upload {
-    let method = head.method.uppercased()
-    let chunked =
-      request.headers[.contentLength] == nil && request.headers[Self.transferEncoding] != nil
-    if chunked, method != "GET", method != "HEAD" {
-      return .streamed(request.body, declaredLength: declaredLength(head))
-    }
+  private func readBody(_ request: Request) async throws -> ByteBuffer {
     let tooLarge = Refusal(
-      status: .contentTooLarge,
-      message: "Request body exceeds the \(maxRequestBodyBytes) byte limit of this proxy"
-    )
+      status: .contentTooLarge, message: "request body exceeds \(maxRequestBodyBytes) bytes")
     if let declared = request.headers[.contentLength].flatMap(Int.init),
       declared > maxRequestBodyBytes
     {
       throw tooLarge
     }
     do {
-      return .buffered(try await request.body.collect(upTo: maxRequestBodyBytes))
+      return try await request.body.collect(upTo: maxRequestBodyBytes)
     } catch let error as HTTPError where error.status == .contentTooLarge {
       throw tooLarge
     }
-  }
-
-  private func declaredLength(_ head: RawFetchRequestHead) -> Int? {
-    head.headers.first { $0.name.lowercased() == "content-length" }
-      .flatMap { Int($0.value.trimmingCharacters(in: .whitespaces)) }
-      .flatMap { $0 >= 0 ? $0 : nil }
   }
 
   private func frame(_ upstream: HTTPClientResponse, for head: RawFetchRequestHead) throws
@@ -149,69 +116,37 @@ struct RawFetchProxy: Sendable {
   {
     let status = Int(upstream.status.code)
     let upstreamHeaders = upstream.headers.map { RawHeaderPair($0.name.lowercased(), $0.value) }
-    let hasBody = RawFetchProtocol.responseHasBody(method: head.method, status: status)
-    let decoding = RawFetchProtocol.upstreamDecoding(upstreamHeaders)
-    let decodedCodings = decoding == .decoded ? RawFetchProtocol.decodedCodings : []
-    if hasBody, decoding == .partiallyDecoded {
-      throw Refusal(
-        status: .badGateway, message: "Upstream stacked a content coding this proxy cannot undo")
-    }
-    if RawFetchProtocol.isDecodedPartialResponse(
-      status: status, headers: upstreamHeaders, decodedCodings: decodedCodings)
-    {
+    if RawFetchProtocol.isDecodedPartial(status: status, headers: upstreamHeaders) {
       throw Refusal(
         status: .badGateway,
-        message: "Upstream answered a range request with an encoded partial body")
+        message: "upstream answered a range request with an encoded partial body")
     }
-    let contentType = upstreamHeaders.first { $0.name == "content-type" }?.value ?? ""
-    let isText = isTextContentType(contentType)
+    let hasBody = RawFetchProtocol.responseHasBody(method: head.method, status: status)
     let headers = RawFetchProtocol.responseHeaders(
-      method: head.method,
-      status: status,
-      headers: upstreamHeaders,
-      bodyRewritten: isText,
-      decodedCodings: decodedCodings
-    )
+      method: head.method, status: status, headers: upstreamHeaders)
     let frame = RawFetchProtocol.encodeResponseFrame(
       RawFetchResponseHead(
         status: status, statusText: upstream.status.reasonPhrase, headers: headers, url: head.url)
     )
-    let body = hasBody ? GunzipSniffingBody(upstream: upstream.body, sniff: isText) : nil
+    let codings =
+      RawFetchProtocol.isDecoded(upstreamHeaders) ? RawFetchProtocol.codings(upstreamHeaders) : []
+    let body = hasBody ? DecodedBody(upstream: upstream.body, codings: codings) : nil
     return Response(
       status: .ok,
-      headers: [.contentType: RawFetchProtocol.contentType, .cacheControl: "no-store, no-cache"],
+      headers: [.contentType: RawFetchProtocol.contentType, .cacheControl: "no-store"],
       body: ResponseBody(asyncSequence: FramedBody(frame: ByteBuffer(bytes: frame), body: body))
     )
-  }
-}
-
-struct GunzipSniffingBody: AsyncSequence, Sendable {
-  typealias Element = ByteBuffer
-  let upstream: HTTPClientResponse.Body
-  let sniff: Bool
-
-  struct AsyncIterator: AsyncIteratorProtocol {
-    var inner: HTTPClientResponse.Body.AsyncIterator
-    var gzip: MaybeGunzipState<HTTPClientResponse.Body.AsyncIterator>
-
-    mutating func next() async throws -> ByteBuffer? {
-      try await gzip.next(from: &inner)
-    }
-  }
-
-  func makeAsyncIterator() -> AsyncIterator {
-    AsyncIterator(inner: upstream.makeAsyncIterator(), gzip: MaybeGunzipState(enabled: sniff))
   }
 }
 
 struct FramedBody: AsyncSequence, Sendable {
   typealias Element = ByteBuffer
   let frame: ByteBuffer
-  let body: GunzipSniffingBody?
+  let body: DecodedBody?
 
   struct AsyncIterator: AsyncIteratorProtocol {
     var frame: ByteBuffer?
-    var body: GunzipSniffingBody.AsyncIterator?
+    var body: DecodedBody.AsyncIterator?
 
     mutating func next() async throws -> ByteBuffer? {
       if let pending = frame {
@@ -232,7 +167,7 @@ func rawProxyError(status: HTTPResponse.Status, message: String) throws -> Respo
   return Response(
     status: status,
     headers: [
-      .contentType: "application/json; charset=utf-8",
+      .contentType: "application/json",
       HTTPField.Name(RawFetchProtocol.errorHeader)!: "1",
     ],
     body: .init(byteBuffer: ByteBuffer(data: data))

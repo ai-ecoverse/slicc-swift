@@ -51,12 +51,12 @@ func rawHead(_ url: String, method: String = "GET", headers: [(String, String)] 
   return String(decoding: data, as: UTF8.self)
 }
 
-func gzip(_ input: [UInt8]) -> [UInt8] {
+func compress(_ input: [UInt8], windowBits: Int32) -> [UInt8] {
   var stream = z_stream()
   deflateInit2_(
-    &stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 31, 8, Z_DEFAULT_STRATEGY, zlibVersion(),
+    &stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, windowBits, 8, Z_DEFAULT_STRATEGY, zlibVersion(),
     Int32(MemoryLayout<z_stream>.size))
-  var output = [UInt8](repeating: 0, count: input.count + 128)
+  var output = [UInt8](repeating: 0, count: input.count + 1024)
   var source = input
   let produced = source.withUnsafeMutableBufferPointer { inBuf in
     output.withUnsafeMutableBufferPointer { outBuf in
@@ -72,7 +72,24 @@ func gzip(_ input: [UInt8]) -> [UInt8] {
   return Array(output[0..<produced])
 }
 
+func gzip(_ input: [UInt8]) -> [UInt8] { compress(input, windowBits: 31) }
+
 let gzippedText = gzip(Array("compressed hello".utf8))
+let brotliText: [UInt8] = [
+  139, 5, 128, 98, 114, 111, 116, 108, 105, 32, 104, 101, 108, 108, 111, 3,
+]
+let stackedText: [UInt8] = [
+  11, 16, 128, 31, 139, 8, 0, 0, 0, 0, 0, 0, 19, 43, 46, 73, 76, 206, 78, 77, 81, 200, 72, 205, 201,
+  201, 7, 0, 53, 151, 214, 74, 13, 0, 0, 0, 3,
+]
+
+func encoded(_ coding: String, _ bytes: [UInt8], status: HTTPResponse.Status = .ok) -> Response {
+  Response(
+    status: status,
+    headers: [.contentType: "text/plain", .contentEncoding: coding],
+    body: .init(byteBuffer: ByteBuffer(bytes: bytes))
+  )
+}
 
 func upstreamRouter() -> Router<BasicRequestContext> {
   let router = Router()
@@ -94,39 +111,45 @@ func upstreamRouter() -> Router<BasicRequestContext> {
   router.get("empty") { _, _ in
     Response(status: .noContent)
   }
-  router.get("gzip") { _, _ in
-    Response(
+  router.get("gzip") { _, _ in encoded("gzip", gzippedText) }
+  router.head("gzip") { _, _ in
+    Response(status: .ok, headers: [.contentEncoding: "gzip", .contentLength: "42"])
+  }
+  router.get("large") { _, _ in
+    let chunks = AsyncStream<ByteBuffer> { continuation in
+      for index in 0..<256 {
+        continuation.yield(ByteBuffer(repeating: UInt8(index), count: 128 * 1024))
+      }
+      continuation.finish()
+    }
+    return Response(
       status: .ok,
-      headers: [.contentType: "text/plain", .contentEncoding: "gzip"],
-      body: .init(byteBuffer: ByteBuffer(bytes: gzippedText))
+      headers: [.contentType: "application/octet-stream"],
+      body: ResponseBody(asyncSequence: chunks)
     )
   }
+  router.get("bomb") { _, _ in encoded("gzip", gzip([UInt8](repeating: 0, count: 64 * 1024 * 1024)))
+  }
+  router.get("padded") { _, _ in encoded("gzip", gzippedText + [0, 0, 0]) }
+  router.get("garbage") { _, _ in encoded("gzip", gzippedText + Array("junk".utf8)) }
+  router.get("x-gzip") { _, _ in encoded("x-gzip", gzippedText) }
+  router.get("members") { _, _ in
+    encoded("gzip", gzippedText + gzip(Array(" and more".utf8)))
+  }
+  router.get("deflate") { _, _ in
+    encoded("deflate", compress(Array("zlib hello".utf8), windowBits: 15))
+  }
+  router.get("raw-deflate") { _, _ in
+    encoded("deflate", compress(Array("raw hello".utf8), windowBits: -15))
+  }
+  router.get("br") { _, _ in encoded("br", brotliText) }
+  router.get("stacked") { _, _ in encoded("gzip, br", stackedText) }
+  router.get("unknown") { _, _ in encoded("zstd", gzippedText) }
+  router.get("partial") { _, _ in encoded("gzip", gzippedText, status: .partialContent) }
   router.get("sniff") { _, _ in
     Response(
       status: .ok,
       headers: [.contentType: "text/javascript"],
-      body: .init(byteBuffer: ByteBuffer(bytes: gzippedText))
-    )
-  }
-  router.get("members") { _, _ in
-    Response(
-      status: .ok,
-      headers: [.contentType: "text/plain"],
-      body: .init(
-        byteBuffer: ByteBuffer(bytes: gzippedText + gzip(Array(" and more".utf8)) + [0, 0]))
-    )
-  }
-  router.get("archive") { _, _ in
-    Response(
-      status: .ok,
-      headers: [.contentType: "application/gzip"],
-      body: .init(byteBuffer: ByteBuffer(bytes: gzippedText))
-    )
-  }
-  router.get("stacked") { _, _ in
-    Response(
-      status: .ok,
-      headers: [.contentType: "text/plain", .contentEncoding: "gzip, br"],
       body: .init(byteBuffer: ByteBuffer(bytes: gzippedText))
     )
   }
@@ -232,6 +255,7 @@ func withHarness(extraOrigins: Set<String> = [], _ body: @Sendable (Harness) asy
   let proxyPort = PortBox()
   let upstream = Application(
     router: upstreamRouter(),
+    server: LocalProxy.server,
     configuration: .init(address: .hostname("127.0.0.1", port: 0)),
     onServerRunning: { await upstreamPort.set($0.localAddress?.port ?? 0) },
     logger: quietLogger

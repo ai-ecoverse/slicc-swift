@@ -8,13 +8,13 @@ SLICC's local proxy for macOS and iOS: the Swift twin of [slicc-node](https://gi
 swift run slicc-swift
 ```
 
-It starts the proxy on `127.0.0.1` with a fresh proxy key, prints the proxy URL and the launch URL, and opens the launch URL in the default browser:
+It starts the proxy on `127.0.0.1` (never another interface) with a fresh proxy key, prints the proxy URL and the launch URL, and opens the launch URL in the default browser:
 
 ```
 https://seven.sliccy.ai/#proxy=http%3A%2F%2F127.0.0.1%3A52731&key=<43-char base64url key>
 ```
 
-Options: `--host HOST`, `--port PORT` (default `0`, any free port), `--page URL` (default `https://seven.sliccy.ai/`), `--no-open`. The binary is not signed or notarized.
+Options: `--port PORT` (default `0`, any free port), `--page URL` (default `https://seven.sliccy.ai/`), `--no-open`. The binary is not signed or notarized.
 
 ## Library
 
@@ -29,12 +29,19 @@ try await proxy.run { proxyURL in
 
 ## Protocol
 
-It's SLICC's raw `/api/fetch-proxy` mode, from `packages/swift-server` and `packages/shared-ts/src/raw-fetch-protocol.ts`.
+It's the protocol in [slicc-node's README](https://github.com/ai-ecoverse/slicc-node#protocol), the raw mode of SLICC's `/api/fetch-proxy`. The kernel's `localProxyTransport` and `probeLocalProxy` (`@ai-ecoverse/slicc-kernel` 1.5.0) are the client.
 
-- **Request:** `POST /api/fetch-proxy`. The upstream head is JSON in `X-Slicc-Raw-Request`: `{"url","method","headers":[[name,value],…]}`. The request body is the upload, either buffered (up to 256 MiB) or streamed when it is sent chunked. Hop-by-hop headers, `Host`, `Content-Length` and `Accept-Encoding` are dropped, and repeated headers are folded (`Cookie` with `; `).
-- **Response:** `200 application/vnd.slicc.raw-fetch`. The body starts with a 4-byte big-endian length and the JSON head `{"status","statusText","headers":[[name,value],…],"url"}`, then the upstream body streams after it. Redirects are not followed, every `Set-Cookie` is kept, and `gzip`/`deflate` are decoded, which also removes `Content-Encoding` and `Content-Length`.
-- **Probe:** `X-Slicc-Raw-Probe: 1` answers `{"rawFetch":1,"requestBodyStreaming":true,"maxRequestBodyBytes":268435456}`.
-- **Errors:** a non-200 status with `X-Proxy-Error: 1` and `{"error":"…"}`. The status is `400` for a malformed head, `413` for an oversized upload, and `502` for an unreachable upstream.
+- **Request:** `POST /api/fetch-proxy`.
+  - **Head:** JSON in `X-Slicc-Raw-Request`, `{"url","method","headers":[[name,value],…]}`. Request heads may be up to 1 MiB. `url` must be http or https and `method` a token, otherwise `400`.
+  - **Body:** buffered up to 256 MiB (`413` past that) and not sent for GET or HEAD.
+  - **Headers:** hop-by-hop headers, `Host`, `Content-Length`, `Accept-Encoding`, `Expect` and `Proxy-Authorization` are dropped. Repeats are folded with `, `, and `Cookie` with `; `. Upstream gets `Accept-Encoding: gzip, deflate, br`, or `identity` when the request has `Range` or `If-Range`.
+- **Response:** `200 application/vnd.slicc.raw-fetch` with `Cache-Control: no-store`.
+  - **Head:** a big-endian u32 length, then the JSON head `{"status","statusText","headers":[[name,value],…],"url"}`. Every `Set-Cookie` is its own entry, and no hop-by-hop headers are included.
+  - **Body:** the decoded upstream body streams after the head.
+  - **Redirects:** not followed.
+- **Decoding:** `gzip`, `x-gzip`, `deflate` and `br` are decoded, including stacked codings. When every coding was undone, `Content-Encoding` and `Content-Length` are dropped. Bodiless responses keep both.
+- **Probe:** `X-Slicc-Raw-Probe: 1` answers `{"rawFetch":1,"requestBodyStreaming":false,"maxRequestBodyBytes":268435456}`.
+- **Errors:** a non-200 status with `X-Proxy-Error: 1` and `{"error":"…"}`. An unreachable upstream is `502 fetch failed: …`, and a `206` that came back encoded is `502` as well.
 
 ## Security gate
 
