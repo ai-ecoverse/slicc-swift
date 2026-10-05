@@ -16,7 +16,7 @@ let package = Package(
     .package(url: "https://github.com/swift-server/async-http-client", from: "1.36.2"),
     .package(url: "https://github.com/apple/swift-log", from: "1.15.1"),
     .package(url: "https://github.com/apple/swift-nio", from: "2.103.0"),
-    .package(url: "https://github.com/swift-server/swift-service-lifecycle", from: "2.8.0"),
+    .package(url: "https://github.com/swift-server/swift-service-lifecycle", from: "2.12.0"),
   ],
   targets: [
     .target(
