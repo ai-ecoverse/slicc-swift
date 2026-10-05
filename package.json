@@ -9,7 +9,7 @@
     "url": "git+https://github.com/ai-ecoverse/slicc-swift.git"
   },
   "scripts": {
-    "lint": "slicc-lint && swift format lint --recursive Sources Tests Package.swift",
+    "lint": "slicc-lint-comments && slicc-no-unit-tests && slicc-agents-md && swift format lint --recursive Sources Tests Package.swift",
     "format": "swift format --in-place --recursive Sources Tests Package.swift",
     "test": "swift test",
     "build": "swift build",
