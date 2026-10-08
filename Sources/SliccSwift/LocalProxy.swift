@@ -24,16 +24,24 @@ public struct LocalProxy: Sendable {
   public let port: Int
   public let key: String
   public let extraOrigins: Set<String>
+  public let folders: [HostFolder]
+  public let log: @Sendable (String) -> Void
+  var hostfsIdle = HostfsProtocol.grantIdle
+  var hostfsPing = HostfsProtocol.pingInterval
 
   public init(
     port: Int = 0,
     key: String = ProxySecurity.mintKey(),
     extraOrigins: Set<String> = ProxySecurity.parseOrigins(
-      ProcessInfo.processInfo.environment[ProxySecurity.devOriginsEnvironment])
+      ProcessInfo.processInfo.environment[ProxySecurity.devOriginsEnvironment]),
+    folders: [HostFolder] = [],
+    log: @escaping @Sendable (String) -> Void = { _ in }
   ) {
     self.port = port
     self.key = key
     self.extraOrigins = extraOrigins
+    self.folders = folders
+    self.log = log
   }
 
   public static func launchURL(page: String = defaultPage, proxyURL: String, key: String) -> String
@@ -47,12 +55,29 @@ public struct LocalProxy: Sendable {
     return "\(base)#proxy=\(encode(proxyURL))&key=\(encode(key))"
   }
 
-  func makeRouter(httpClient: HTTPClient, port: BoundPort) -> Router<BasicRequestContext> {
+  func makeRouter(httpClient: HTTPClient, port: BoundPort, hostfs: Hostfs) -> Router<
+    BasicRequestContext
+  > {
     let router = Router()
     router.add(middleware: ProxyGateMiddleware(key: key, extraOrigins: extraOrigins, port: port))
-    let proxy = RawFetchProxy(httpClient: httpClient)
-    router.post(RouterPath(RawFetchProtocol.path)) { request, _ in
+    var proxy = RawFetchProxy(httpClient: httpClient)
+    proxy.hostfs = !hostfs.folders.isEmpty
+    router.post(RouterPath(RawFetchProtocol.path)) { [proxy] request, _ in
       try await proxy.respond(to: request)
+    }
+    router.post(RouterPath(HostfsProtocol.grantPath)) { request, _ in await hostfs.grant(request) }
+    router.delete(RouterPath(HostfsProtocol.grantPath)) { request, _ in
+      await hostfs.grant(request)
+    }
+    router.post(RouterPath(HostfsProtocol.mountsPath)) { _, _ in hostfs.mounts() }
+    router.post(RouterPath(HostfsProtocol.path)) { request, _ in
+      try await hostfs.handle(request, path: HostfsProtocol.path)
+    }
+    router.put(RouterPath(HostfsProtocol.writePath)) { request, _ in
+      try await hostfs.handle(request, path: HostfsProtocol.writePath)
+    }
+    router.post(RouterPath(HostfsProtocol.watchPath)) { request, _ in
+      try await hostfs.handle(request, path: HostfsProtocol.watchPath)
     }
     return router
   }
@@ -66,10 +91,12 @@ public struct LocalProxy: Sendable {
     let boundPort = BoundPort()
     var logger = Logger(label: "slicc-swift")
     logger.logLevel = logLevel
+    let hostfs = Hostfs(folders: folders, idle: hostfsIdle, pingInterval: hostfsPing, log: log)
     return Application(
-      router: makeRouter(httpClient: httpClient, port: boundPort),
+      router: makeRouter(httpClient: httpClient, port: boundPort, hostfs: hostfs),
       server: Self.server,
       configuration: .init(address: .hostname(host, port: port)),
+      services: [HostfsService(hostfs: hostfs)],
       onServerRunning: { channel in
         boundPort.value = channel.localAddress?.port ?? 0
         await onReady("http://\(host):\(boundPort.value)")

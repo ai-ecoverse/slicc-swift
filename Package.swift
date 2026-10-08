@@ -27,6 +27,8 @@ let package = Package(
         .product(name: "AsyncHTTPClient", package: "async-http-client"),
         .product(name: "Logging", package: "swift-log"),
         .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
+        .product(name: "NIOPosix", package: "swift-nio"),
+        .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
       ]
     ),
     .executableTarget(name: "slicc-swift", dependencies: ["SliccSwift"]),

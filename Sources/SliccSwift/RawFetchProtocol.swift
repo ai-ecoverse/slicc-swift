@@ -190,7 +190,9 @@ public enum RawFetchProtocol {
     return out + "\""
   }
 
-  static func probeReplyJSON(maxRequestBodyBytes: Int) -> String {
-    "{\"rawFetch\":\(protocolVersion),\"requestBodyStreaming\":false,\"maxRequestBodyBytes\":\(maxRequestBodyBytes)}"
+  static func probeReplyJSON(maxRequestBodyBytes: Int, hostfs: Bool = false) -> String {
+    let folders = hostfs ? ",\"hostfs\":\(HostfsProtocol.protocolVersion)" : ""
+    return
+      "{\"rawFetch\":\(protocolVersion),\"requestBodyStreaming\":false,\"maxRequestBodyBytes\":\(maxRequestBodyBytes)\(folders)}"
   }
 }

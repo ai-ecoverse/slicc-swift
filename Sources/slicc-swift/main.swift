@@ -5,8 +5,12 @@ struct LauncherOptions {
   var port = 0
   var page = LocalProxy.defaultPage
   var open = true
+  var quiet = false
+  var mounts: [String] = []
 
-  static let usage = "usage: slicc-swift [--port PORT] [--page URL] [--no-open]"
+  static let usage = """
+    usage: slicc-swift [--port PORT] [--page URL] [--mount PATH[:NAME][:ro]]... [--no-open] [--quiet]
+    """
 
   init(_ arguments: [String]) throws {
     var rest = arguments[...]
@@ -18,7 +22,9 @@ struct LauncherOptions {
         }
         port = parsed
       case "--page": page = try Self.value(argument, &rest)
+      case "--mount": mounts.append(try Self.value(argument, &rest))
       case "--no-open": open = false
+      case "--quiet": quiet = true
       case "--help", "-h": throw LauncherError.help
       default: throw LauncherError.usage("unknown argument \(argument)")
       }
@@ -56,7 +62,15 @@ do {
   exit(2)
 }
 
-let proxy = LocalProxy(port: options.port)
+@Sendable func logLine(_ line: String) {
+  FileHandle.standardError.write(Data("\(line)\n".utf8))
+}
+
+@Sendable func quietLine(_ line: String) {}
+
+let folders = HostFolder.load(options.mounts, warn: logLine)
+let proxy = LocalProxy(
+  port: options.port, folders: folders, log: options.quiet ? quietLine : logLine)
 try await proxy.run { proxyURL in
   let launch = LocalProxy.launchURL(page: options.page, proxyURL: proxyURL, key: proxy.key)
   print("slicc-swift proxy on \(proxyURL)")

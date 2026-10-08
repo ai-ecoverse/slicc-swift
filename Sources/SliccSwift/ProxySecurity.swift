@@ -7,8 +7,15 @@ public enum ProxySecurity {
 
   static let allowHeaders = [
     "Content-Type", keyHeader, RawFetchProtocol.requestHeader, RawFetchProtocol.probeHeader,
+    HostfsProtocol.tokenHeader, HostfsProtocol.requestHeader,
   ].joined(separator: ", ")
-  static let allowMethods = "POST, OPTIONS"
+  static let exposeHeaders = [
+    RawFetchProtocol.errorHeader, HostfsProtocol.errnoHeader, "ETag", "Content-Range",
+  ].joined(separator: ", ")
+  static let allowMethods = "GET, POST, PUT, DELETE, OPTIONS"
+  static let gatedPaths = [RawFetchProtocol.path: ["POST"]]
+    .merging(HostfsProtocol.keyPaths) { $1 }
+    .merging(HostfsProtocol.tokenPaths) { $1 }
   static let preflightMaxAge = "600"
 
   private static let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "[::1]"]
@@ -79,7 +86,7 @@ public enum ProxySecurity {
   static func corsHeaders(origin: String) -> HTTPFields {
     var fields = HTTPFields()
     fields[HTTPField.Name("Access-Control-Allow-Origin")!] = origin
-    fields[HTTPField.Name("Access-Control-Expose-Headers")!] = RawFetchProtocol.errorHeader
+    fields[HTTPField.Name("Access-Control-Expose-Headers")!] = exposeHeaders
     fields[HTTPField.Name("Vary")!] = "Origin"
     return fields
   }
