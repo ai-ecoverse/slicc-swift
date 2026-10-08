@@ -76,7 +76,7 @@ func errorText(_ bytes: [UInt8]) -> String? {
       #expect(response.headers.first(name: "access-control-allow-origin") == origin)
       #expect(
         response.headers.first(name: "access-control-expose-headers")
-          == RawFetchProtocol.errorHeader)
+          == "X-Proxy-Error, X-Hostfs-Errno, ETag, Content-Range")
       #expect(response.headers.first(name: "vary") == "Origin")
     }
   }
@@ -121,11 +121,13 @@ func errorText(_ bytes: [UInt8]) -> String? {
       let headers = response.headers
       #expect(headers.first(name: "access-control-allow-origin") == hostedOrigin)
       #expect(headers.first(name: "access-control-allow-private-network") == "true")
-      #expect(headers.first(name: "access-control-allow-methods") == "POST, OPTIONS")
+      #expect(
+        headers.first(name: "access-control-allow-methods") == "GET, POST, PUT, DELETE, OPTIONS")
       #expect(headers.first(name: "access-control-max-age") == "600")
       #expect(
         headers.first(name: "access-control-allow-headers")
-          == "Content-Type, X-Bridge-Token, X-Slicc-Raw-Request, X-Slicc-Raw-Probe")
+          == "Content-Type, X-Bridge-Token, X-Slicc-Raw-Request, X-Slicc-Raw-Probe, "
+          + "X-Hostfs-Token, X-Hostfs-Request")
       #expect(headers.first(name: "access-control-allow-credentials") == nil)
     }
   }

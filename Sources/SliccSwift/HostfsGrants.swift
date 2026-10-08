@@ -78,6 +78,7 @@ final class HostfsGrant: Sendable {
     var nextStream = 0
     var deadline: ContinuousClock.Instant
     var alive = true
+    var timer: Task<Void, Never>?
   }
 
   let state: NIOLockedValueBox<State>
@@ -154,7 +155,8 @@ final class HostfsGrants: Sendable {
       id: Self.digest(token), folder: folder, readonly: readonly || folder.readonly,
       origin: origin, deadline: clock.now.advanced(by: idle))
     grants.withLockedValue { $0[grant.id] = grant }
-    Task { [weak self] in await self?.expire(grant) }
+    let timer = Task { [weak self] in _ = await self?.expire(grant) }
+    grant.state.withLockedValue { $0.timer = timer }
     return (token, grant)
   }
 
@@ -197,6 +199,7 @@ final class HostfsGrants: Sendable {
     guard let grant = grants.withLockedValue({ $0.removeValue(forKey: id) }) else { return false }
     let (handles, ends) = grant.state.withLockedValue { state in
       state.alive = false
+      state.timer?.cancel()
       defer {
         state.handles.removeAll()
         state.streams.removeAll()

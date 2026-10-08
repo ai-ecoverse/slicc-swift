@@ -248,9 +248,12 @@ actor PortBox {
   }
 }
 
-func withHarness(extraOrigins: Set<String> = [], _ body: @Sendable (Harness) async throws -> Void)
-  async throws
-{
+func withHarness(
+  extraOrigins: Set<String> = [],
+  folders: [HostFolder] = [],
+  hostfsIdle: Duration = HostfsProtocol.grantIdle,
+  _ body: @Sendable (Harness) async throws -> Void
+) async throws {
   let upstreamPort = PortBox()
   let proxyPort = PortBox()
   let upstream = Application(
@@ -261,7 +264,8 @@ func withHarness(extraOrigins: Set<String> = [], _ body: @Sendable (Harness) asy
     logger: quietLogger
   )
   let proxyClient = RawFetchProxy.makeHTTPClient()
-  let proxy = LocalProxy(port: 0, key: testKey, extraOrigins: extraOrigins)
+  var proxy = LocalProxy(port: 0, key: testKey, extraOrigins: extraOrigins, folders: folders)
+  proxy.hostfsIdle = hostfsIdle
   let app = proxy.makeApplication(httpClient: proxyClient, logLevel: .critical) { url in
     await proxyPort.set(Int(url.split(separator: ":").last ?? "") ?? 0)
   }
