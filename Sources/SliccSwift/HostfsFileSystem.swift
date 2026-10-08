@@ -181,21 +181,30 @@ enum HostfsFileSystem {
     let mtime = body["mtime"]
     if mode != nil, validMode(mode) == nil { throw HostfsError("EINVAL") }
     if mtime != nil, mtime?.finite == nil { throw HostfsError("EINVAL") }
+    let modified = try mtime?.finite.map { try timespecOf(milliseconds: $0) }
     let attr = try look(path)
     if let mode = validMode(mode) {
       if attr.isSymlink { throw HostfsError("EINVAL", "cannot chmod a symlink") }
       try check(chmod(path, mode_t(mode)))
     }
-    if let milliseconds = mtime?.finite {
-      let seconds = (milliseconds / 1000).rounded(.down)
-      let nanoseconds = ((milliseconds - seconds * 1000) * 1_000_000).rounded()
-      var times = [
-        attr.stats.st_atimespec,
-        timespec(tv_sec: Int(seconds), tv_nsec: Int(nanoseconds)),
-      ]
+    if let modified {
+      var times = [attr.stats.st_atimespec, modified]
       try check(utimensat(AT_FDCWD, path, &times, AT_SYMLINK_NOFOLLOW))
     }
     return .object([])
+  }
+
+  static func timespecOf(milliseconds: Double) throws -> timespec {
+    var seconds = (milliseconds / 1000).rounded(.down)
+    var nanoseconds = ((milliseconds - seconds * 1000) * 1_000_000).rounded()
+    if nanoseconds >= 1_000_000_000 {
+      seconds += 1
+      nanoseconds -= 1_000_000_000
+    }
+    guard let whole = Int(exactly: seconds), let fraction = Int(exactly: nanoseconds),
+      (0..<1_000_000_000).contains(fraction)
+    else { throw HostfsError("EINVAL") }
+    return timespec(tv_sec: whole, tv_nsec: fraction)
   }
 
   static func wantsWrite(_ body: JSONValue) -> Bool {

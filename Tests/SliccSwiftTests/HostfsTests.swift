@@ -434,6 +434,10 @@ func names(_ listing: [String: Any]) -> [String] {
       #expect((moved?["attr"] as? [String: Any])?["kind"] as? String == "directory")
       try await fs.ok(
         token, ["op": "setattr", "path": "hello.txt", "mode": 0o600, "mtime": 1_000_000_000_000])
+      for mtime in [1e300, -1e300] {
+        try await fs.errno(
+          token, ["op": "setattr", "path": "hello.txt", "mtime": mtime], "EINVAL", 400)
+      }
       let attr = try await fs.ok(token, ["op": "stat", "path": "hello.txt"])
       #expect(attr["mode"] as? Int == 0o600)
       #expect(attr["mtime"] as? Int == 1_000_000_000_000)
