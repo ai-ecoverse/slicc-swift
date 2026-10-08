@@ -30,7 +30,8 @@ struct ProxyGateMiddleware<Context: RequestContext>: RouterMiddleware {
     guard ProxySecurity.isLoopbackHost(request.head.authority, port: port.value) else {
       return try rawProxyError(status: .forbidden, message: "host not allowed")
     }
-    guard request.uri.path == RawFetchProtocol.path else {
+    let path = request.uri.path
+    guard let methods = ProxySecurity.gatedPaths[path] else {
       return try rawProxyError(status: .notFound, message: "not found")
     }
     guard let origin = request.headers[.origin],
@@ -47,9 +48,11 @@ struct ProxyGateMiddleware<Context: RequestContext>: RouterMiddleware {
     }
     let cors = ProxySecurity.corsHeaders(origin: origin)
     var response: Response
-    if request.method != .post {
+    if !methods.contains(request.method.rawValue) {
       response = try rawProxyError(status: .methodNotAllowed, message: "method not allowed")
-      response.headers[.allow] = ProxySecurity.allowMethods
+      response.headers[.allow] = (methods + ["OPTIONS"]).joined(separator: ", ")
+    } else if HostfsProtocol.tokenPaths[path] != nil {
+      response = try await next(request, context)
     } else if !ProxySecurity.validateKey(request.headers[Self.keyHeader], key) {
       response = try rawProxyError(status: .forbidden, message: "proxy key missing or wrong")
     } else {
