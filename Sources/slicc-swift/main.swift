@@ -2,17 +2,20 @@ import Foundation
 import SliccSwift
 
 struct LauncherOptions {
-  var port = 0
+  var port: Int?
   var page = LocalProxy.defaultPage
   var open = true
   var quiet = false
   var mounts: [String] = []
   var kernelPort = KernelProtocol.defaultPort
   var kernel = true
+  var rotateKey = false
+  var ephemeral = false
 
   static let usage = """
     usage: slicc-swift [--port PORT] [--page URL] [--mount PATH[:NAME][:ro]]...
-                       [--kernel-port PORT] [--no-kernel] [--no-open] [--quiet]
+                       [--kernel-port PORT] [--no-kernel] [--rotate-key] [--ephemeral]
+                       [--no-open] [--quiet]
     """
 
   init(_ arguments: [String]) throws {
@@ -32,6 +35,8 @@ struct LauncherOptions {
         }
         kernelPort = parsed
       case "--no-kernel": kernel = false
+      case "--rotate-key": rotateKey = true
+      case "--ephemeral": ephemeral = true
       case "--no-open": open = false
       case "--quiet": quiet = true
       case "--help", "-h": throw LauncherError.help
@@ -77,18 +82,50 @@ do {
 
 @Sendable func quietLine(_ line: String) {}
 
+func fail(_ message: String) -> Never {
+  logLine("slicc-swift: \(message)")
+  exit(1)
+}
+
+if options.ephemeral && options.rotateKey {
+  logLine("--ephemeral stores no key, so there is none to rotate")
+  exit(2)
+}
+
+let persistent = !options.ephemeral
+let key: String
+do {
+  key =
+    persistent
+    ? try ProxyIdentity.persistentKey(rotate: options.rotateKey, warn: logLine)
+    : ProxySecurity.mintKey()
+} catch {
+  fail("\(error)")
+}
 let folders = HostFolder.load(options.mounts, warn: logLine)
 let proxy = LocalProxy(
-  port: options.port, folders: folders, kernelPort: options.kernel ? options.kernelPort : nil,
+  port: options.port ?? (persistent ? ProxyIdentity.defaultPort : 0),
+  portFallback: persistent && options.port == nil, key: key, folders: folders,
+  kernelPort: options.kernel ? options.kernelPort : nil,
   log: options.quiet ? quietLine : logLine, warn: logLine)
-try await proxy.run { proxyURL, kernelPort in
-  let launch = LocalProxy.launchURL(page: options.page, proxyURL: proxyURL, key: proxy.key)
-  print("slicc-swift proxy on \(proxyURL)")
-  print(launch)
-  fflush(stdout)
-  if let kernelPort {
-    let suffix = kernelPort == 80 ? "" : ":\(kernelPort)"
-    logLine("kernel services on http://<port>.kernel.localhost\(suffix)/")
+do {
+  try await run()
+} catch  where LocalProxy.addressInUse(error) {
+  fail("cannot listen on \(LocalProxy.host):\(proxy.port) (EADDRINUSE)")
+} catch {
+  fail("\(error)")
+}
+
+func run() async throws {
+  try await proxy.run { proxyURL, kernelPort in
+    let launch = LocalProxy.launchURL(page: options.page, proxyURL: proxyURL, key: proxy.key)
+    print("slicc-swift proxy on \(proxyURL)")
+    print(launch)
+    fflush(stdout)
+    if let kernelPort {
+      let suffix = kernelPort == 80 ? "" : ":\(kernelPort)"
+      logLine("kernel services on http://<port>.kernel.localhost\(suffix)/")
+    }
+    if options.open { openInBrowser(launch) }
   }
-  if options.open { openInBrowser(launch) }
 }
