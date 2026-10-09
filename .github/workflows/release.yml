@@ -39,7 +39,7 @@ jobs:
 
       - run: swift build
 
-      - run: swift test
+      - run: swift test --no-parallel
 
       - run: npx semantic-release
         env:
