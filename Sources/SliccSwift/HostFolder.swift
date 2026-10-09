@@ -66,6 +66,7 @@ public struct HostFolder: Sendable, Equatable {
       ("chmod", .bool(true)),
       ("caseInsensitive", .bool(caseInsensitive)),
       ("normalization", .string(HostfsProtocol.normalization)),
+      ("ranges", .bool(true)),
     ])
   }
 }

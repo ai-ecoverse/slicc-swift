@@ -268,6 +268,7 @@ func names(_ listing: [String: Any]) -> [String] {
       #expect(capabilities["maxIo"] as? Int == 16 * 1024 * 1024)
       #expect(capabilities["caseInsensitive"] is Bool)
       #expect(capabilities["normalization"] as? String == "nfd-insensitive")
+      #expect(capabilities["ranges"] as? Bool == true)
       let noKey = try await fs.keyed(HostfsProtocol.grantPath, ["mount": "project"], key: "x")
       #expect(noKey.status == 403)
       #expect(noKey.header(RawFetchProtocol.errorHeader) == "1")
@@ -371,6 +372,7 @@ func names(_ listing: [String: Any]) -> [String] {
       try await fs.ok(token, ["op": "symlink", "target": "/", "path": "root-link"])
       try await fs.errno(token, ["op": "list", "path": "root-link/etc"], "EACCES")
       try await fs.errno(token, ["op": "setattr", "path": "key-link", "mode": 0o777], "EINVAL")
+      try await fs.errno(token, ["op": "setattr", "path": "key-link", "size": 0], "EINVAL")
       #expect(
         try await fs.ok(token, ["op": "readlink", "path": "inner-link"])["target"] as? String
           == "hello.txt")
@@ -392,6 +394,7 @@ func names(_ listing: [String: Any]) -> [String] {
         ["op": "rename", "from": "hello.txt", "to": "bye.txt"],
         ["op": "symlink", "target": "hello.txt", "path": "l"],
         ["op": "setattr", "path": "hello.txt", "mode": 0o600],
+        ["op": "setattr", "path": "hello.txt", "size": 0],
         ["op": "open", "path": "hello.txt", "write": true],
         ["op": "open", "path": "new.txt", "create": true],
         ["op": "open", "path": "hello.txt", "truncate": true],
@@ -404,6 +407,42 @@ func names(_ listing: [String: Any]) -> [String] {
       #expect(try fs.fixture.read(fs.fixture.folder + "/hello.txt") == "hello")
       let docs = try await fs.token("docs")
       try await fs.errno(docs, ["op": "mkdir", "path": "x"], "EROFS")
+      try await fs.errno(docs, ["op": "setattr", "path": "x", "size": 0], "EROFS")
+    }
+  }
+
+  @Test func setattrWithSizeTruncatesAndExtendsWithZeros() async throws {
+    try await withHostfs { fs in
+      let token = try await fs.token("project")
+      let path = fs.fixture.folder + "/sized.txt"
+      let bytes = { try Array(Data(contentsOf: URL(fileURLWithPath: path))) }
+      try fs.fixture.write(path, "hello, world")
+      try await fs.ok(token, ["op": "setattr", "path": "sized.txt", "size": 5])
+      #expect(try fs.fixture.read(path) == "hello")
+      try await fs.ok(token, ["op": "setattr", "path": "sized.txt", "size": 9])
+      #expect(try bytes() == Array("hello".utf8) + [0, 0, 0, 0])
+      #expect(try await fs.ok(token, ["op": "stat", "path": "sized.txt"])["size"] as? Int == 9)
+      try await fs.ok(
+        token, ["op": "setattr", "path": "sized.txt", "size": 0, "mtime": 1_000_000_000_000])
+      let attr = try await fs.ok(token, ["op": "stat", "path": "sized.txt"])
+      #expect(attr["size"] as? Int == 0)
+      #expect(attr["mtime"] as? Int == 1_000_000_000_000)
+      let opened = try await fs.ok(token, ["op": "open", "path": "sized.txt", "write": true])
+      try await fs.ok(token, ["op": "setattr", "path": "sized.txt", "size": 3])
+      #expect(try await fs.put(token, opened["fh"], 3, Array("abc".utf8)).status == 200)
+      let released = try await fs.ok(token, ["op": "release", "fh": opened["fh"] ?? 0])
+      #expect((released["attr"] as? [String: Any])?["size"] as? Int == 6)
+      #expect(try bytes() == [0, 0, 0] + Array("abc".utf8))
+      try await fs.ok(token, ["op": "mkdir", "path": "sized-dir"])
+      try await fs.errno(token, ["op": "setattr", "path": "sized-dir", "size": 0], "EISDIR", 409)
+      try await fs.errno(token, ["op": "setattr", "path": "", "size": 0], "EISDIR", 409)
+      try await fs.errno(token, ["op": "setattr", "path": "gone.txt", "size": 0], "ENOENT", 404)
+      let invalid: [Any] = [-1, 1.5, "3", 9_007_199_254_740_992.0]
+      for size in invalid {
+        try await fs.errno(
+          token, ["op": "setattr", "path": "sized.txt", "size": size], "EINVAL", 400)
+      }
+      #expect(try await fs.ok(token, ["op": "stat", "path": "sized.txt"])["size"] as? Int == 6)
     }
   }
 
