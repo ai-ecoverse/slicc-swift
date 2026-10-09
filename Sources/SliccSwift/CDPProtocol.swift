@@ -63,11 +63,20 @@ public enum CDPProtocol {
     return nil
   }
 
+  static func unsupportedSocket(_ url: String) -> CDPError {
+    .discoveryFailed(
+      "webSocketDebuggerUrl \(url) is not supported; only ws:// debugging URLs are supported")
+  }
+
   static func debuggerURL(_ body: Data) throws -> String {
     guard let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
-      let url = json["webSocketDebuggerUrl"] as? String,
-      url.hasPrefix("ws://") || url.hasPrefix("wss://")
+      let url = json["webSocketDebuggerUrl"] as? String, !url.isEmpty
     else {
+      throw CDPError.discoveryFailed("no browser webSocketDebuggerUrl from CDP")
+    }
+    let lower = url.lowercased()
+    if lower.hasPrefix("wss://") { throw unsupportedSocket(url) }
+    guard lower.hasPrefix("ws://") else {
       throw CDPError.discoveryFailed("no browser webSocketDebuggerUrl from CDP")
     }
     return url
@@ -75,19 +84,22 @@ public enum CDPProtocol {
 
   static func endpoint(_ url: String) throws -> DebuggerEndpoint {
     guard let parts = URLComponents(string: url), let scheme = parts.scheme?.lowercased(),
-      scheme == "ws" || scheme == "wss", let host = parts.host, !host.isEmpty,
-      parts.user == nil, parts.password == nil
+      let host = parts.host, !host.isEmpty, parts.user == nil, parts.password == nil
     else { throw CDPError.discoveryFailed("no browser webSocketDebuggerUrl from CDP") }
+    if scheme == "wss" { throw unsupportedSocket(url) }
+    guard scheme == "ws" else {
+      throw CDPError.discoveryFailed("no browser webSocketDebuggerUrl from CDP")
+    }
     var name = host
     if name.hasPrefix("["), name.hasSuffix("]") { name = String(name.dropFirst().dropLast()) }
-    let port = parts.port ?? (scheme == "wss" ? 443 : 80)
+    let port = parts.port ?? 80
     guard (1...65535).contains(port) else {
       throw CDPError.discoveryFailed("no browser webSocketDebuggerUrl from CDP")
     }
     var uri = parts.percentEncodedPath
     if uri.isEmpty { uri = "/" }
     if let query = parts.percentEncodedQuery { uri += "?\(query)" }
-    return DebuggerEndpoint(host: name, port: port, uri: uri, tls: scheme == "wss")
+    return DebuggerEndpoint(host: name, port: port, uri: uri, tls: false)
   }
 
   static func dropsChromeText(_ text: String) -> Bool {

@@ -230,8 +230,15 @@ func waitLog(_ harness: Harness, _ needle: String) async throws {
         .utf8)
     #expect(
       try CDPProtocol.debuggerURL(body) == "ws://127.0.0.1:9222/devtools/browser/abc")
-    let secure = Data(#"{"webSocketDebuggerUrl":"wss:\/\/browser.test/devtools/browser/a"}"#.utf8)
-    #expect(try CDPProtocol.debuggerURL(secure) == "wss://browser.test/devtools/browser/a")
+  }
+
+  @Test func aSecureDebuggerURLIsRefusedBeforeADial() {
+    let url = "wss://browser.test/devtools/browser/a"
+    let message =
+      "webSocketDebuggerUrl \(url) is not supported; only ws:// debugging URLs are supported"
+    let body = Data(#"{"webSocketDebuggerUrl":"wss:\/\/browser.test/devtools/browser/a"}"#.utf8)
+    #expect(throws: CDPError.discoveryFailed(message)) { try CDPProtocol.debuggerURL(body) }
+    #expect(throws: CDPError.discoveryFailed(message)) { try CDPProtocol.endpoint(url) }
   }
 
   @Test func anEmptyDebuggerURLIsRejected() {
@@ -254,10 +261,6 @@ func waitLog(_ harness: Harness, _ needle: String) async throws {
     let v6 = try CDPProtocol.endpoint("ws://[::1]:9223/devtools/browser/x?y=1")
     #expect(
       v6 == DebuggerEndpoint(host: "::1", port: 9223, uri: "/devtools/browser/x?y=1", tls: false))
-    let secure = try CDPProtocol.endpoint("wss://browser.test/devtools/browser/a")
-    #expect(
-      secure
-        == DebuggerEndpoint(host: "browser.test", port: 443, uri: "/devtools/browser/a", tls: true))
     for url in ["http://127.0.0.1:9222/", ""] {
       #expect(throws: CDPError.self) { try CDPProtocol.endpoint(url) }
     }
