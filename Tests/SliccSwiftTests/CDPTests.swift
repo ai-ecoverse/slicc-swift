@@ -50,6 +50,8 @@ final class ChromeDouble: Sendable {
   private let hits = NIOLockedValueBox(0)
   private let failAfter = NIOLockedValueBox<Int?>(nil)
   private let path = NIOLockedValueBox("devtools/browser/one")
+  private let secureSocket = NIOLockedValueBox(false)
+  private let advertised = NIOLockedValueBox<String?>(nil)
   private let opened = NIOLockedValueBox<[String]>([])
   private let received = NIOLockedValueBox<[String: [String]]>([:])
   private let sinks = NIOLockedValueBox<[String: AsyncStream<String>.Continuation]>([:])
@@ -75,6 +77,14 @@ final class ChromeDouble: Sendable {
   var currentPath: String { path.withLockedValue { $0 } }
 
   func setPath(_ value: String) { path.withLockedValue { $0 = value } }
+
+  func setSecureSocket(_ value: Bool) { secureSocket.withLockedValue { $0 = value } }
+
+  func servesSecure() -> Bool { secureSocket.withLockedValue { $0 } }
+
+  func noteAdvertised(_ url: String) { advertised.withLockedValue { $0 = url } }
+
+  func advertisedURL() -> String? { advertised.withLockedValue { $0 } }
 
   func attach(_ path: String, _ sink: AsyncStream<String>.Continuation) {
     opened.withLockedValue { $0.append(path) }
@@ -137,7 +147,9 @@ func chromeRouter(_ chrome: ChromeDouble, _ ports: PortBox) -> Router<BasicWebSo
     let hit = chrome.bump()
     if chrome.rejects(hit) { return Response(status: .internalServerError) }
     let port = await ports.wait()
-    let url = "ws://127.0.0.1:\(port)/\(chrome.currentPath)"
+    let scheme = chrome.servesSecure() ? "wss" : "ws"
+    let url = "\(scheme)://127.0.0.1:\(port)/\(chrome.currentPath)"
+    chrome.noteAdvertised(url)
     let json = "{\"Browser\":\"Chrome\",\"webSocketDebuggerUrl\":\"\(url)\"}"
     return Response(
       status: .ok, headers: [.contentType: "application/json"],
@@ -230,8 +242,22 @@ func waitLog(_ harness: Harness, _ needle: String) async throws {
         .utf8)
     #expect(
       try CDPProtocol.debuggerURL(body) == "ws://127.0.0.1:9222/devtools/browser/abc")
-    let secure = Data(#"{"webSocketDebuggerUrl":"wss:\/\/browser.test/devtools/browser/a"}"#.utf8)
-    #expect(try CDPProtocol.debuggerURL(secure) == "wss://browser.test/devtools/browser/a")
+  }
+
+  @Test func aSecureDebuggerURLIsRefusedBeforeADial() async throws {
+    try await withChrome { harness, chrome in
+      chrome.setSecureSocket(true)
+      let page = try await cdpClient(harness)
+      defer { page.close() }
+      #expect(await page.closeCode() == 1000)
+      let url = try #require(chrome.advertisedURL())
+      let message =
+        "webSocketDebuggerUrl \(url) is not supported; only ws:// debugging URLs are supported"
+      try await waitLog(harness, message)
+      try await Task.sleep(for: .milliseconds(200))
+      #expect(chrome.hitCount() == 1)
+      #expect(chrome.isOpen("devtools/browser/one") == false)
+    }
   }
 
   @Test func anEmptyDebuggerURLIsRejected() {
@@ -254,10 +280,6 @@ func waitLog(_ harness: Harness, _ needle: String) async throws {
     let v6 = try CDPProtocol.endpoint("ws://[::1]:9223/devtools/browser/x?y=1")
     #expect(
       v6 == DebuggerEndpoint(host: "::1", port: 9223, uri: "/devtools/browser/x?y=1", tls: false))
-    let secure = try CDPProtocol.endpoint("wss://browser.test/devtools/browser/a")
-    #expect(
-      secure
-        == DebuggerEndpoint(host: "browser.test", port: 443, uri: "/devtools/browser/a", tls: true))
     for url in ["http://127.0.0.1:9222/", ""] {
       #expect(throws: CDPError.self) { try CDPProtocol.endpoint(url) }
     }
