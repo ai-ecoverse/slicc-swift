@@ -216,6 +216,7 @@ func errorBody(_ reply: HTTPReply) -> String? {
       let (socket, _) = try await TestSocket.open(port)
       let upload = kernelRequest(port, path: "/kernel/upload", method: "POST", body: bigBody)
       socket.channel.writeAndFlush(ByteBuffer(bytes: upload), promise: nil)
+      _ = try await page.seen.waitFor { ($0.received.values.first ?? 0) > 0 ? true : nil }
       try await Task.sleep(for: .milliseconds(300))
       let sent = await page.seen.received.values.first ?? 0
       #expect(sent > 0 && sent <= KernelProtocol.window, "\(sent)")
@@ -379,9 +380,9 @@ func errorBody(_ reply: HTTPReply) -> String? {
     try await withKernel { harness, _ in
       let page = try await TestPage.connect(harness)
       await page.close()
-      try await Task.sleep(for: .milliseconds(100))
+      let closed = "kernel tunnel from \(hostedOrigin) closed (0 open)"
+      _ = try await page.seen.waitFor { _ in harness.logs.lines.contains(closed) ? true : nil }
       #expect(harness.logs.lines.contains("kernel tunnel from \(hostedOrigin) (1 open)"))
-      #expect(harness.logs.lines.contains("kernel tunnel from \(hostedOrigin) closed (0 open)"))
     }
   }
 }
