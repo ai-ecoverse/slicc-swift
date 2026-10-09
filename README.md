@@ -1,6 +1,6 @@
 # slicc-swift
 
-SLICC's local proxy for macOS and iOS: the Swift twin of [slicc-node](https://github.com/ai-ecoverse/slicc-node). The new SLICC on `*.sliccy.ai` sends program traffic (curl, git, npm) through the kernel's `localProxyTransport({ url, key })`, which talks to this proxy on loopback. The proxy can also share folders from the user's disk with the page ([Host folders](#host-folders)) and serve the page's kernel servers on `http://<port>.kernel.localhost/` ([Kernel services](#kernel-services)).
+SLICC's local proxy for macOS and iOS: the Swift twin of [slicc-node](https://github.com/ai-ecoverse/slicc-node). The new SLICC on `*.sliccy.ai` sends program traffic (curl, git, npm) through the kernel's `localProxyTransport({ url, key })`, which talks to this proxy on loopback. The proxy can also share folders from the user's disk with the page ([Host folders](#host-folders)), serve the page's kernel servers on `http://<port>.kernel.localhost/` ([Kernel services](#kernel-services)), and forward `/cdp` to a browser that is already listening ([Browser debugging](#browser-debugging)).
 
 ## Launcher
 
@@ -21,6 +21,7 @@ Options:
 - `--mount PATH[:NAME][:ro]`: shares a folder with the page, and can be repeated. See [Host folders](#host-folders).
 - `--kernel-port PORT`: the port on `127.0.0.1` for `http://<port>.kernel.localhost/`, default `80`. See [Kernel services](#kernel-services).
 - `--no-kernel`: does not serve the page's kernel on `<port>.kernel.localhost`.
+- `--cdp URL`: relay `/cdp` to a browser already listening at this HTTP debugging URL, such as `http://127.0.0.1:9222`. See [Browser debugging](#browser-debugging).
 - `--rotate-key`: replaces the stored key, so pages and launch URLs holding the old one stop working.
 - `--ephemeral`: uses a fresh key and any free port, and stores nothing: the key dies with the process.
 - `--no-open`: prints the launch URL without opening a browser.
@@ -40,7 +41,7 @@ try await proxy.run { proxyURL in
 }
 ```
 
-`LocalProxy` mints a fresh key unless given one; `ProxyIdentity.persistentKey(directory:rotate:warn:)` returns the stored one, creating it if needed, and `ProxyIdentity.configDirectory()` names the directory. `LocalProxy` also takes `portFallback` (listen on any free port when `port` is taken), `kernelPort` (default `80`, `nil` for off) and `warn`. `run(onListening:)` passes the bound kernel port too, or `nil` when the listener is off or could not bind.
+`LocalProxy` mints a fresh key unless given one; `ProxyIdentity.persistentKey(directory:rotate:warn:)` returns the stored one, creating it if needed, and `ProxyIdentity.configDirectory()` names the directory. `LocalProxy` also takes `portFallback` (listen on any free port when `port` is taken), `kernelPort` (default `80`, `nil` for off), `cdp` (HTTP debugging URL of a browser already running, or `nil` for off) and `warn`. `run(onListening:)` passes the bound kernel port too, or `nil` when the listener is off or could not bind.
 
 ## Protocol
 
@@ -55,7 +56,7 @@ It's the protocol in [slicc-node's README](https://github.com/ai-ecoverse/slicc-
   - **Body:** the decoded upstream body streams after the head.
   - **Redirects:** not followed.
 - **Decoding:** `gzip`, `x-gzip`, `deflate` and `br` are decoded, including stacked codings. When every coding was undone, `Content-Encoding` and `Content-Length` are dropped. Bodiless responses keep both.
-- **Probe:** `X-Slicc-Raw-Probe: 1` answers `{"rawFetch":1,"requestBodyStreaming":false,"maxRequestBodyBytes":268435456}`. With at least one folder exported, it adds `"hostfs":1`. With the [kernel listener](#kernel-services) up, it adds `"kernelTunnel":1,"kernelPort":<port>`.
+- **Probe:** `X-Slicc-Raw-Probe: 1` answers `{"rawFetch":1,"requestBodyStreaming":false,"maxRequestBodyBytes":268435456}`. With at least one folder exported, it adds `"hostfs":1`. With the [kernel listener](#kernel-services) up, it adds `"kernelTunnel":1,"kernelPort":<port>`. With a [browser debugging URL](#browser-debugging), it adds `"cdp":1`.
 - **Errors:** a non-200 status with `X-Proxy-Error: 1` and `{"error":"…"}`. An unreachable upstream is `502 fetch failed: …`, and a `206` that came back encoded is `502` as well.
 
 ## Restarts
@@ -72,7 +73,7 @@ This is slicc-node's [restarts](https://github.com/ai-ecoverse/slicc-node#restar
 The checks run in this order:
 
 1. **Host:** the `Host` header must be `127.0.0.1`, `localhost` or `[::1]` with the bound port. This blocks DNS rebinding. Otherwise `403 host not allowed`.
-2. **Path:** `/api/fetch-proxy` (`POST`) and the [host folder](#host-folders) paths pass, and `/api/kernel-tunnel` takes only a WebSocket upgrade (see [Kernel services](#kernel-services)). Anything else gets `404 not found`.
+2. **Path:** `/api/fetch-proxy` (`POST`) and the [host folder](#host-folders) paths pass. `/api/kernel-tunnel` and `/cdp` take only a WebSocket upgrade (see [Kernel services](#kernel-services) and [Browser debugging](#browser-debugging)). Anything else gets `404 not found`.
 3. **Origin:** the request needs an `Origin` of the form `https://<label>.sliccy.ai`, which covers `seven` and the branch hosts but not `www` or the apex. An origin listed in `SLICC_PROXY_ALLOWED_ORIGINS` (comma-separated, for local development) also passes. Otherwise `403 origin not allowed`.
 4. **Preflight:** an `OPTIONS` request answers `204` with `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS`, `Access-Control-Allow-Headers: Content-Type, X-Bridge-Token, X-Slicc-Raw-Request, X-Slicc-Raw-Probe, X-Hostfs-Token, X-Hostfs-Request`, and `Access-Control-Max-Age: 600`. It adds `Access-Control-Allow-Private-Network: true` when the browser asks for Private or Local Network Access.
 5. **Method:** each path takes only its own methods. Any other gets `405`, with `Allow` listing them and `OPTIONS`.
@@ -196,9 +197,21 @@ Every message is binary: a `u8` type, a big-endian `u32` stream id, then the pay
 
 Any local process, and any web page Chrome lets reach loopback, can reach kernel services on the kernel port, like any dev server on localhost. Run with `--no-kernel` to keep them inside the page.
 
+## Browser debugging
+
+`--cdp <url>` names an already-running browser's HTTP debugging endpoint, such as `http://127.0.0.1:9222`. slicc-swift does not launch the browser. Without that URL, `/cdp` is `404` and the probe omits `cdp`. With it, the probe adds `"cdp":1`.
+
+The page opens `ws://127.0.0.1:<proxy port>/cdp` with the subprotocols `slicc.cdp.v1` and `slicc.key.<key>`. Before upgrading, the proxy checks the loopback `Host` (`403 host not allowed`), the path and that a debugging URL was given (`404 not found`), the `Origin` (`403 origin not allowed`), that `slicc.cdp.v1` is offered (`400 subprotocol slicc.cdp.v1 missing`) and the key in constant time (`403 proxy key missing or wrong`). Refusals are `{"error":…}` with `X-Proxy-Error: 1` and no CORS headers. The `101` selects `slicc.cdp.v1` and does not echo the key. A key in the query string or in `X-Bridge-Token` is ignored. A plain `GET /cdp` is `404`.
+
+Text frames are relayed as they are, including a flattened top-level `sessionId`. The browser socket is `webSocketDebuggerUrl` from `GET <url>/json/version`, read again on every reconnect. One page holds the slot. A second page closes the first with code `4001` and reason `superseded-by-new-cdp-client`. A frame from a page that has lost the slot is dropped.
+
+When the browser socket closes, the proxy reads `/json/version` again every second until the socket is back or the process stops. Frames sent in the gap are held, at most 1000, and the oldest is dropped past that. They are forwarded only when they still belong to that same browser connection and that same page. Frames held across the drop are discarded. The page that held the slot when the socket died is then closed with code `4002` and reason `upstream-reset`. A page that connected during the gap stays open, and the frames it held are sent. After three failed attempts the current page is closed once with `4002`, and the proxy keeps reading `/json/version`. `Network.webSocketFrameReceived` and `Network.webSocketFrameSent` are not relayed, and neither is a frame over 64 MiB.
+
+The browser already speaks flattened sessions (`Target.attachToTarget` with `flatten: true`, then a top-level `sessionId`). This proxy does not implement `Target.*`. Chrome and Electron launch, secret unmasking, the tray and the lick system stay in the monorepo.
+
 ## Development
 
-`npm run lint` runs the slicc lint tools and `swift format lint`. `swift test` runs the integration tests, which start a loopback upstream and the proxy and cover the protocol, the gate, host folders (traversal and symlink escapes, read-only tokens, foreign origins, token expiry, in-place writes and the watch stream) restarts (the stored key and its permissions, `--rotate-key`, `--ephemeral`, the port fallback and two first starts at once, against the built launcher) and kernel services (the `Host` allowlist, the tunnel gate, forwarded HTTP and WebSocket exchanges, credits and backpressure, resets, protocol violations and several tabs, against a simulated page). Releases are GitHub tags only, via semantic-release.
+`npm run lint` runs the slicc lint tools and `swift format lint`. `swift test` runs the integration tests, which start a loopback upstream and the proxy and cover the protocol, the gate, host folders (traversal and symlink escapes, read-only tokens, foreign origins, token expiry, in-place writes and the watch stream) restarts (the stored key and its permissions, `--rotate-key`, `--ephemeral`, the port fallback and two first starts at once, against the built launcher), kernel services (the `Host` allowlist, the tunnel gate, forwarded HTTP and WebSocket exchanges, credits and backpressure, resets, protocol violations and several tabs, against a simulated page) and `/cdp` (the origin and key gate, `webSocketDebuggerUrl` parsing, flattened text frames and upstream reconnect, against a simulated Chrome). Releases are GitHub tags only, via semantic-release.
 
 ## What else is in SLICC's Swift code
 
@@ -206,7 +219,7 @@ These numbers are lines of source and lines of tests at `ai-ecoverse/slicc` `ori
 
 | Package | Source / tests | What it is |
 | --- | --- | --- |
-| `swift-server` | 15.6k / 21k | Hummingbird server for Sliccstart. Raw fetch proxy (ported here). Default fetch-proxy mode with secret masking, SigV4 and HMAC signing (`Keychain`, `Signing`, about 2k). CDP proxy and Chrome/Electron launch (`Browser`, `WebSocket`, about 5.9k). Host FS routes, sudo approval, handoff, lick system and activity tracking (`Server`). Tray follower glue (`Follower`). |
+| `swift-server` | 15.6k / 21k | Hummingbird server for Sliccstart. Raw fetch proxy and the `/cdp` relay (ported here). Default fetch-proxy mode with secret masking, SigV4 and HMAC signing (`Keychain`, `Signing`, about 2k). Chrome/Electron launch stays in `Browser`. Host FS routes, sudo approval, handoff, lick system and activity tracking (`Server`). Tray follower glue (`Follower`). |
 | `swift-launcher` | 11.2k / 13.5k | Sliccstart, the macOS app that finds Chromium browsers and Electron apps and launches them with SLICC. It depends on every library below and on AppUpdater. |
 | `swift-trayfollower` | 4.3k / 3.8k | WebRTC tray follower transport, shared by Sliccstart, swift-server and the iOS app. |
 | `swift-traykit` | 1.7k / 2.3k | Tray VFS on top of trayfollower. |
@@ -218,7 +231,7 @@ These numbers are lines of source and lines of tests at `ai-ecoverse/slicc` `ori
 ## Proposed order
 
 1. **Raw fetch proxy and launcher.** This repo.
-2. **CDP bridge.** Move `Browser`, `WebSocket/CDPProxy` and the `/cdp` subprotocol gate into a `SliccCDP` target here, alongside ai-ecoverse/slicc-cdp, so the launcher can attach a local Chrome.
+2. **CDP relay.** `/cdp` is here when `--cdp` names a browser that is already listening: discovery, the single page slot and upstream reconnect, on the same origin and proxy key as the kernel tunnel. Chrome and Electron launch, the tray, keychain unmasking and the lick system stay in the monorepo.
 3. **Secrets in the proxy.** `Keychain`, `Signing` and the masking and unmasking in fetch-proxy, once the new SLICC has a secrets story.
 4. **Host routes.** Host folders are here. Sudo approval and handoff come as the new SLICC grows those features.
 5. **Leaf libraries.** `swift-optel` and `swift-widgetkit`, which have no SLICC dependencies and can move any time.

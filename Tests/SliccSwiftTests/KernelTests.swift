@@ -29,6 +29,7 @@ func errorBody(_ reply: HTTPReply) -> String? {
       let probe = try await probeObject(harness)
       #expect(probe["kernelTunnel"] as? Int == 1)
       #expect(probe["kernelPort"] as? Int == port)
+      #expect(probe["cdp"] == nil)
     }
   }
 
@@ -37,6 +38,7 @@ func errorBody(_ reply: HTTPReply) -> String? {
       #expect(harness.kernelPort == nil)
       let probe = try await probeObject(harness)
       #expect(probe["kernelTunnel"] == nil)
+      #expect(probe["cdp"] == nil)
       let refused = try await WSClient.tunnel(harness)
       #expect(refused.reply.status == 404)
       refused.close()

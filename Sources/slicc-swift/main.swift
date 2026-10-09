@@ -9,13 +9,14 @@ struct LauncherOptions {
   var mounts: [String] = []
   var kernelPort = KernelProtocol.defaultPort
   var kernel = true
+  var cdp: String?
   var rotateKey = false
   var ephemeral = false
 
   static let usage = """
     usage: slicc-swift [--port PORT] [--page URL] [--mount PATH[:NAME][:ro]]...
-                       [--kernel-port PORT] [--no-kernel] [--rotate-key] [--ephemeral]
-                       [--no-open] [--quiet]
+                       [--kernel-port PORT] [--no-kernel] [--cdp URL]
+                       [--rotate-key] [--ephemeral] [--no-open] [--quiet]
     """
 
   init(_ arguments: [String]) throws {
@@ -35,6 +36,7 @@ struct LauncherOptions {
         }
         kernelPort = parsed
       case "--no-kernel": kernel = false
+      case "--cdp": cdp = try Self.value(argument, &rest)
       case "--rotate-key": rotateKey = true
       case "--ephemeral": ephemeral = true
       case "--no-open": open = false
@@ -103,10 +105,16 @@ do {
   fail("\(error)")
 }
 let folders = HostFolder.load(options.mounts, warn: logLine)
+let cdpURL: String?
+do {
+  cdpURL = try CDPProtocol.browserEndpoint(options.cdp)
+} catch {
+  fail("\(error)")
+}
 let proxy = LocalProxy(
   port: options.port ?? (persistent ? ProxyIdentity.defaultPort : 0),
   portFallback: persistent && options.port == nil, key: key, folders: folders,
-  kernelPort: options.kernel ? options.kernelPort : nil,
+  kernelPort: options.kernel ? options.kernelPort : nil, cdp: cdpURL,
   log: options.quiet ? quietLine : logLine, warn: logLine)
 do {
   try await run()
@@ -126,6 +134,7 @@ func run() async throws {
       let suffix = kernelPort == 80 ? "" : ":\(kernelPort)"
       logLine("kernel services on http://<port>.kernel.localhost\(suffix)/")
     }
+    if let cdpURL { logLine("cdp proxy for \(cdpURL)") }
     if options.open { openInBrowser(launch) }
   }
 }

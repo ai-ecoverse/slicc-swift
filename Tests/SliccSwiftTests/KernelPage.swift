@@ -136,6 +136,8 @@ final class TestSocket: Sendable {
 
   func shutdownOutput() { channel.close(mode: .output, promise: nil) }
 
+  deinit { close() }
+
   func close() { channel.close(promise: nil) }
 
   func reset() {
@@ -232,7 +234,8 @@ final class WSClient: Sendable {
   }
 
   static func connect(
-    port: Int, path: String, host: String, origin: String? = nil, protocols: [String] = []
+    port: Int, path: String, host: String, origin: String? = nil, protocols: [String] = [],
+    headers: [(String, String)] = []
   ) async throws -> WSClient {
     let (socket, inbox) = try await TestSocket.open(port)
     var head =
@@ -242,6 +245,7 @@ final class WSClient: Sendable {
     if !protocols.isEmpty {
       head += "Sec-WebSocket-Protocol: \(protocols.joined(separator: ", "))\r\n"
     }
+    for (name, value) in headers { head += "\(name): \(value)\r\n" }
     try await socket.write(head + "\r\n")
     let headBytes = try #require(await inbox.until(Array("\r\n\r\n".utf8)))
     let lines = String(decoding: headBytes, as: UTF8.self).components(separatedBy: "\r\n")

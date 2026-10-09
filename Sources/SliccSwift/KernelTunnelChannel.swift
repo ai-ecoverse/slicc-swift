@@ -1,3 +1,5 @@
+import CryptoKit
+import Foundation
 import HummingbirdCore
 import Logging
 import NIOConcurrencyHelpers
@@ -12,6 +14,7 @@ struct KernelTunnelChannel: HTTPChannelHandler {
   enum Upgrade: Sendable {
     case http(NIOAsyncChannel<HTTPRequestPart, HTTPResponsePart>)
     case tunnel(NIOAsyncChannel<WebSocketFrame, WebSocketFrame>, String)
+    case cdp(NIOAsyncChannel<WebSocketFrame, WebSocketFrame>)
   }
 
   struct Value: ServerChildChannelValue {
@@ -23,42 +26,21 @@ struct KernelTunnelChannel: HTTPChannelHandler {
   let gate: TunnelGate
   let tunnels: KernelTunnels
   let ping: Duration
+  let cdp: CDPProxy?
 
-  static func builder(gate: TunnelGate, tunnels: KernelTunnels, ping: Duration) -> HTTPServerBuilder
+  static func builder(gate: TunnelGate, tunnels: KernelTunnels, ping: Duration, cdp: CDPProxy?)
+    -> HTTPServerBuilder
   {
     HTTPServerBuilder { responder in
-      KernelTunnelChannel(responder: responder, gate: gate, tunnels: tunnels, ping: ping)
+      KernelTunnelChannel(responder: responder, gate: gate, tunnels: tunnels, ping: ping, cdp: cdp)
     }
   }
 
   func setup(channel: any Channel, logger: Logger) -> EventLoopFuture<Value> {
     let gate = gate
     return channel.eventLoop.makeCompletedFuture {
-      let upgrader = NIOTypedWebSocketServerUpgrader<Upgrade>(
-        maxFrameSize: KernelProtocol.maxMessage,
-        shouldUpgrade: { channel, head in
-          let refused = KernelProtocol.refusal(
-            host: head.headers.first(name: "host"),
-            path: String(head.uri.split(separator: "?", maxSplits: 1).first ?? ""),
-            origin: head.headers.first(name: "origin"),
-            protocols: head.headers[canonicalForm: "sec-websocket-protocol"].joined(
-              separator: ", "),
-            gate: gate
-          )
-          guard refused == nil else { return channel.eventLoop.makeSucceededFuture(nil) }
-          return channel.eventLoop.makeSucceededFuture(
-            HTTPHeaders([("Sec-WebSocket-Protocol", KernelProtocol.tunnelProtocol)]))
-        },
-        upgradePipelineHandler: { channel, head in
-          channel.eventLoop.makeCompletedFuture {
-            let socket = try NIOAsyncChannel<WebSocketFrame, WebSocketFrame>(
-              wrappingChannelSynchronously: channel)
-            return Upgrade.tunnel(socket, head.headers.first(name: "origin") ?? "")
-          }
-        }
-      )
       let upgrade = NIOTypedHTTPServerUpgradeConfiguration<Upgrade>(
-        upgraders: [upgrader],
+        upgraders: [SocketUpgrader(gate: gate)],
         notUpgradingCompletionHandler: { channel in
           channel.eventLoop.makeCompletedFuture {
             try channel.pipeline.syncOperations.addHandler(HTTP1ToHTTPServerCodec(secure: false))
@@ -95,9 +77,109 @@ struct KernelTunnelChannel: HTTPChannelHandler {
       await handleHTTP(asyncChannel: channel, logger: logger)
     case .tunnel(let socket, let origin):
       await KernelTunnelSession(socket: socket, origin: origin, tunnels: tunnels, ping: ping).run()
+    case .cdp(let socket):
+      if let cdp {
+        await cdp.handle(socket)
+      } else {
+        try? await socket.channel.close()
+      }
     }
   }
 
+}
+
+enum ProxyUpgrade {
+  enum Decision: Sendable {
+    case refuse(Int, String)
+    case cdp
+    case tunnel
+  }
+
+  static func decision(_ head: HTTPRequestHead, _ gate: TunnelGate) -> Decision {
+    let protocols = head.headers[canonicalForm: "sec-websocket-protocol"].map(String.init)
+    return route(
+      host: head.headers.first(name: "host"),
+      path: String(head.uri.split(separator: "?", maxSplits: 1).first ?? ""),
+      origin: head.headers.first(name: "origin"),
+      protocols: protocols.isEmpty ? nil : protocols.joined(separator: ", "),
+      gate: gate
+    )
+  }
+
+  static func route(
+    host: String?, path: String, origin: String?, protocols: String?, gate: TunnelGate
+  ) -> Decision {
+    guard ProxySecurity.isLoopbackHost(host, port: gate.port.value) else {
+      return .refuse(403, "host not allowed")
+    }
+    if path == CDPProtocol.path {
+      if let refused = CDPProtocol.refusal(origin: origin, protocols: protocols, gate: gate) {
+        return .refuse(refused.status, refused.message)
+      }
+      return .cdp
+    }
+    if let refused = KernelProtocol.refusal(
+      host: host, path: path, origin: origin, protocols: protocols, gate: gate
+    ) {
+      return .refuse(refused.status, refused.message)
+    }
+    return .tunnel
+  }
+}
+
+struct SocketUpgrader: NIOTypedHTTPServerProtocolUpgrader {
+  typealias UpgradeResult = KernelTunnelChannel.Upgrade
+
+  let supportedProtocol = "websocket"
+  let requiredUpgradeHeaders: [String] = []
+  let gate: TunnelGate
+
+  func buildUpgradeResponse(
+    channel: any Channel, upgradeRequest: HTTPRequestHead, initialResponseHeaders: HTTPHeaders
+  ) -> EventLoopFuture<HTTPHeaders> {
+    guard let key = upgradeRequest.headers.first(name: "sec-websocket-key"),
+      upgradeRequest.headers.first(name: "sec-websocket-version") == "13"
+    else {
+      return channel.eventLoop.makeFailedFuture(ChannelError.inappropriateOperationForState)
+    }
+    let path = Self.path(upgradeRequest.uri)
+    let selected =
+      path == CDPProtocol.path ? CDPProtocol.cdpProtocol : KernelProtocol.tunnelProtocol
+    var headers = initialResponseHeaders
+    headers.replaceOrAdd(name: "upgrade", value: "websocket")
+    headers.replaceOrAdd(name: "connection", value: "upgrade")
+    headers.add(name: "sec-websocket-accept", value: Self.accept(key))
+    headers.add(name: "sec-websocket-protocol", value: selected)
+    return channel.eventLoop.makeSucceededFuture(headers)
+  }
+
+  func upgrade(channel: any Channel, upgradeRequest: HTTPRequestHead) -> EventLoopFuture<
+    UpgradeResult
+  > {
+    let path = Self.path(upgradeRequest.uri)
+    let limit = path == CDPProtocol.path ? CDPProtocol.maxMessage : KernelProtocol.maxMessage
+    let origin = upgradeRequest.headers.first(name: "origin") ?? ""
+    return channel.eventLoop.makeCompletedFuture {
+      try channel.pipeline.syncOperations.addHandler(WebSocketFrameEncoder())
+      try channel.pipeline.syncOperations.addHandler(
+        ByteToMessageHandler(WebSocketFrameDecoder(maxFrameSize: limit)))
+      try channel.pipeline.syncOperations.addHandler(WebSocketProtocolErrorHandler())
+      let socket = try NIOAsyncChannel<WebSocketFrame, WebSocketFrame>(
+        wrappingChannelSynchronously: channel)
+      if path == CDPProtocol.path { return .cdp(socket) }
+      return .tunnel(socket, origin)
+    }
+  }
+
+  private static func path(_ uri: String) -> String {
+    String(uri.split(separator: "?", maxSplits: 1).first ?? "")
+  }
+
+  private static func accept(_ key: String) -> String {
+    let digest = Insecure.SHA1.hash(
+      data: Data((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8))
+    return Data(digest).base64EncodedString()
+  }
 }
 
 final class UpgradeRefusal: ChannelInboundHandler, RemovableChannelHandler, Sendable {
@@ -116,20 +198,19 @@ final class UpgradeRefusal: ChannelInboundHandler, RemovableChannelHandler, Send
     else {
       return context.fireChannelRead(data)
     }
-    let protocols = head.headers[canonicalForm: "sec-websocket-protocol"].map(String.init)
-    let refused = KernelProtocol.refusal(
-      host: head.headers.first(name: "host"),
-      path: String(head.uri.split(separator: "?", maxSplits: 1).first ?? ""),
-      origin: head.headers.first(name: "origin"),
-      protocols: protocols.isEmpty ? nil : protocols.joined(separator: ", "),
-      gate: gate
-    )
     let websocket =
       head.headers[canonicalForm: "upgrade"].contains { $0.lowercased() == "websocket" }
       && head.headers[canonicalForm: "connection"].contains { $0.lowercased() == "upgrade" }
       && head.headers.first(name: "sec-websocket-version") == "13"
       && head.headers.contains(name: "sec-websocket-key")
-    guard let refused = refused ?? (websocket ? nil : (400, "bad upgrade")) else {
+    let refusal: (status: Int, message: String)?
+    switch ProxyUpgrade.decision(head, gate) {
+    case .refuse(let status, let message):
+      refusal = (status, message)
+    case .cdp, .tunnel:
+      refusal = websocket ? nil : (400, "bad upgrade")
+    }
+    guard let refused = refusal else {
       context.fireChannelRead(data)
       context.pipeline.syncOperations.removeHandler(self, promise: nil)
       return

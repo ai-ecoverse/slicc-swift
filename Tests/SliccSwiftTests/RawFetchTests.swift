@@ -15,6 +15,7 @@ import Testing
       #expect(reply["rawFetch"] as? Int == 1)
       #expect(reply["requestBodyStreaming"] as? Bool == false)
       #expect(reply["maxRequestBodyBytes"] as? Int == RawFetchProtocol.requestBodyCap)
+      #expect(reply["cdp"] == nil)
     }
   }
 

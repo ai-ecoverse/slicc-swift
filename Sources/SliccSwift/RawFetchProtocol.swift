@@ -190,14 +190,15 @@ public enum RawFetchProtocol {
     return out + "\""
   }
 
-  static func probeReplyJSON(maxRequestBodyBytes: Int, hostfs: Bool = false, kernelPort: Int? = nil)
-    -> String
-  {
+  static func probeReplyJSON(
+    maxRequestBodyBytes: Int, hostfs: Bool = false, kernelPort: Int? = nil, cdp: Bool = false
+  ) -> String {
     let folders = hostfs ? ",\"hostfs\":\(HostfsProtocol.protocolVersion)" : ""
     let kernel =
       kernelPort.map { ",\"kernelTunnel\":\(KernelProtocol.tunnelVersion),\"kernelPort\":\($0)" }
       ?? ""
+    let browser = cdp ? ",\"cdp\":\(CDPProtocol.protocolVersion)" : ""
     return
-      "{\"rawFetch\":\(protocolVersion),\"requestBodyStreaming\":false,\"maxRequestBodyBytes\":\(maxRequestBodyBytes)\(folders)\(kernel)}"
+      "{\"rawFetch\":\(protocolVersion),\"requestBodyStreaming\":false,\"maxRequestBodyBytes\":\(maxRequestBodyBytes)\(folders)\(kernel)\(browser)}"
   }
 }
