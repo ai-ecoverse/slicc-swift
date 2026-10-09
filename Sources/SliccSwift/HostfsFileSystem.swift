@@ -180,9 +180,12 @@ enum HostfsFileSystem {
     let mode = body["mode"]
     let mtime = body["mtime"]
     if mode != nil, validMode(mode) == nil { throw HostfsError("EINVAL") }
+    let size = body["size"]
     if mtime != nil, mtime?.finite == nil { throw HostfsError("EINVAL") }
+    if size != nil, validSize(size) == nil { throw HostfsError("EINVAL") }
     let modified = try mtime?.finite.map { try timespecOf(milliseconds: $0) }
     let attr = try look(path)
+    if let size = validSize(size) { try resize(path, attr, size) }
     if let mode = validMode(mode) {
       if attr.isSymlink { throw HostfsError("EINVAL", "cannot chmod a symlink") }
       try check(chmod(path, mode_t(mode)))
@@ -192,6 +195,20 @@ enum HostfsFileSystem {
       try check(utimensat(AT_FDCWD, path, &times, AT_SYMLINK_NOFOLLOW))
     }
     return .object([])
+  }
+
+  private static func validSize(_ value: JSONValue?) -> Int? {
+    guard let size = value?.safeInteger, size >= 0 else { return nil }
+    return size
+  }
+
+  private static func resize(_ path: String, _ attr: HostfsAttr, _ size: Int) throws {
+    if attr.isDirectory { throw HostfsError("EISDIR") }
+    if !attr.isFile { throw HostfsError("EINVAL", "not a regular file") }
+    let fd = open(path, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+    if fd == -1 { throw HostfsError.posix(errno) }
+    defer { close(fd) }
+    try check(ftruncate(fd, off_t(size)))
   }
 
   static func timespecOf(milliseconds: Double) throws -> timespec {

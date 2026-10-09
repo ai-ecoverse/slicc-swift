@@ -94,12 +94,13 @@ This is slicc-node's [host folders](https://github.com/ai-ecoverse/slicc-node#ho
 | `/api/hostfs/write` | `PUT` | `X-Hostfs-Token` |
 | `/api/hostfs/watch` | `POST` | `X-Hostfs-Token` |
 
-**Tokens.** `POST /api/hostfs/grant` with the key and `{"mount","readonly"?}` answers `{"token","mount","readonly","capabilities":{"maxIo":16777216,"symlinks":true,"chmod":true,"caseInsensitive","normalization":"nfd-insensitive"}}`. An unknown mount is `ENOENT`.
+**Tokens.** `POST /api/hostfs/grant` with the key and `{"mount","readonly"?}` answers `{"token","mount","readonly","capabilities":{"maxIo":16777216,"symlinks":true,"chmod":true,"caseInsensitive","normalization":"nfd-insensitive","ranges":true}}`. An unknown mount is `ENOENT`.
 
 - A token reaches only its folder, and only from the origin that was granted it. `readonly: true`, or an export marked `:ro`, makes every write `EROFS`.
 - A token lives in memory until `DELETE /api/hostfs/grant` with `{"token"}`, until the process exits, or until 5 minutes pass with no request and no open watch. Its file handles close with it. A dead, unknown or foreign token is `403 hostfs token missing, unknown or revoked` with `X-Proxy-Error: 1`.
 - Tokens are never accepted in a query string and never logged. The proxy keeps only their SHA-256.
 - `caseInsensitive` is probed on the folder's volume.
+- `ranges: true` says `setattr` takes `size`, so the kernel reads and writes in pages. A proxy without it is used whole-file.
 - `POST /api/hostfs/mounts` answers `[{"name","readonly"}]`.
 
 **Paths** are relative to the folder, `/`-separated, with `""` for the root. `..`, a leading `/` and NUL are refused (`EACCES`, `EINVAL`). Every operation resolves the parent with `realpath` and refuses it outside the folder (`EACCES`). The last component has lstat semantics, and files open with `O_NOFOLLOW`, so `open` on a symlink is `ELOOP`. Operations that change the namespace hold an exclusive lock and all others a shared one, so a page cannot swap a directory for a symlink between the check and the use.
@@ -116,7 +117,7 @@ This is slicc-node's [host folders](https://github.com/ai-ecoverse/slicc-node#ho
 | `rename` | `from`, `to` | `{}`; a directory onto a non-empty one is `ENOTEMPTY` |
 | `symlink` | `target`, `path` | `{}`; `target` is stored as given |
 | `readlink` | `path` | `{"target"}` |
-| `setattr` | `path`, `mode?`, `mtime?` (ms) | `{}`; `mode` on a symlink is `EINVAL` |
+| `setattr` | `path`, `size?`, `mode?`, `mtime?` (ms) | `{}`; `size` truncates or extends with zeros, like `truncate(2)`, then `mode` and `mtime` apply; `size` on a directory is `EISDIR`, `size` or `mode` on a symlink is `EINVAL` |
 | `statfs` | | `{"bsize","blocks","bfree","bavail"}` |
 | `open` | `path`, `write?`, `create?`, `truncate?`, `exclusive?`, `mode?` | `{"fh","attr"}` |
 | `read` | `fh`, `offset`, `size` (at most `maxIo`), `ifMatch?` | the bytes, with `ETag` and `Content-Range`; short at EOF, empty past it |
