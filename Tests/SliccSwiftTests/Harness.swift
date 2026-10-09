@@ -2,7 +2,10 @@ import AsyncHTTPClient
 import Foundation
 import HTTPTypes
 import Hummingbird
+import HummingbirdCore
+import HummingbirdWebSocket
 import Logging
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOHTTP1
 import ServiceLifecycle
@@ -187,13 +190,66 @@ func upstreamRouter() -> Router<BasicRequestContext> {
       body: .init(byteBuffer: body)
     )
   }
+  router.get("big") { _, _ in
+    Response(
+      status: .ok,
+      headers: [.contentType: "application/octet-stream"],
+      body: .init(byteBuffer: ByteBuffer(bytes: bigBody))
+    )
+  }
+  router.on("kernel/**", method: .get) { request, _ in try await kernelEcho(request) }
+  router.on("kernel/**", method: .post) { request, _ in try await kernelEcho(request) }
   return router
+}
+
+let bigBody = [UInt8](repeating: 7, count: 3 * 1024 * 1024)
+
+func kernelEcho(_ request: Request) async throws -> Response {
+  var size = 0
+  for try await chunk in request.body { size += chunk.readableBytes }
+  let object: [String: Any] = [
+    "url": request.uri.description, "host": request.head.authority ?? "", "size": size,
+  ]
+  let data = try JSONSerialization.data(withJSONObject: object)
+  return Response(
+    status: .ok, headers: [.contentType: "application/json"],
+    body: .init(byteBuffer: ByteBuffer(data: data)))
+}
+
+func upstreamServer() -> HTTPServerBuilder {
+  let router = Router(context: BasicWebSocketRequestContext.self)
+  router.ws("hmr") { inbound, outbound, _ in
+    for try await message in inbound.messages(maxSize: 1 << 20) {
+      if case .text(let text) = message { try await outbound.write(.text("echo \(text)")) }
+    }
+  }
+  return .http1WebSocketUpgrade(
+    webSocketRouter: router,
+    configuration: .init(
+      http1: .init(
+        httpDecoderConfiguration: .init(
+          maxHeaderFieldSize: RawFetchProtocol.maxHeaderBytes,
+          maxHeaderListSize: RawFetchProtocol.maxHeaderBytes))))
+}
+
+final class LogLines: Sendable {
+  private let box = NIOLockedValueBox<[String]>([])
+
+  var lines: [String] { box.withLockedValue { $0 } }
+
+  func add(_ line: String) { box.withLockedValue { $0.append(line) } }
 }
 
 struct Harness {
   let upstream: String
   let proxy: String
   let client: HTTPClient
+  var kernelPort: Int? = nil
+  var logs = LogLines()
+  var warnings = LogLines()
+
+  var upstreamPort: Int { Int(upstream.split(separator: ":").last ?? "") ?? 0 }
+  var proxyPort: Int { Int(proxy.split(separator: ":").last ?? "") ?? 0 }
 
   func post(
     origin: String? = hostedOrigin,
@@ -252,21 +308,30 @@ func withHarness(
   extraOrigins: Set<String> = [],
   folders: [HostFolder] = [],
   hostfsIdle: Duration = HostfsProtocol.grantIdle,
+  kernelPort: Int? = nil,
+  kernelOpenTimeout: Duration = KernelProtocol.openTimeout,
   _ body: @Sendable (Harness) async throws -> Void
 ) async throws {
   let upstreamPort = PortBox()
   let proxyPort = PortBox()
+  let kernelBox = PortBox()
+  let logs = LogLines()
+  let warnings = LogLines()
   let upstream = Application(
     router: upstreamRouter(),
-    server: LocalProxy.server,
+    server: upstreamServer(),
     configuration: .init(address: .hostname("127.0.0.1", port: 0)),
     onServerRunning: { await upstreamPort.set($0.localAddress?.port ?? 0) },
     logger: quietLogger
   )
   let proxyClient = RawFetchProxy.makeHTTPClient()
-  var proxy = LocalProxy(port: 0, key: testKey, extraOrigins: extraOrigins, folders: folders)
+  var proxy = LocalProxy(
+    port: 0, key: testKey, extraOrigins: extraOrigins, folders: folders, kernelPort: kernelPort,
+    log: logs.add, warn: warnings.add)
   proxy.hostfsIdle = hostfsIdle
-  let app = proxy.makeApplication(httpClient: proxyClient, logLevel: .critical) { url in
+  proxy.kernelOpenTimeout = kernelOpenTimeout
+  let app = proxy.makeApplication(httpClient: proxyClient, logLevel: .critical) { url, kernel in
+    await kernelBox.set(kernel ?? -1)
     await proxyPort.set(Int(url.split(separator: ":").last ?? "") ?? 0)
   }
   let client = HTTPClient(eventLoopGroupProvider: .singleton)
@@ -276,10 +341,14 @@ func withHarness(
   )
   let outcome = try await withThrowingTaskGroup(of: Void.self) { group in
     group.addTask { try await services.run() }
+    let kernel = await kernelBox.wait()
     let harness = Harness(
       upstream: "http://127.0.0.1:\(await upstreamPort.wait())",
       proxy: "http://127.0.0.1:\(await proxyPort.wait())",
-      client: client
+      client: client,
+      kernelPort: kernel < 0 ? nil : kernel,
+      logs: logs,
+      warnings: warnings
     )
     let result: Result<Void, any Error>
     do {
