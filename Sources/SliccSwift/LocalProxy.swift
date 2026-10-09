@@ -4,6 +4,7 @@ import Hummingbird
 import HummingbirdCore
 import Logging
 import NIOCore
+import ServiceLifecycle
 
 public struct LocalProxy: Sendable {
   public static let defaultPage = "https://seven.sliccy.ai/"
@@ -16,12 +17,14 @@ public struct LocalProxy: Sendable {
   public let extraOrigins: Set<String>
   public let folders: [HostFolder]
   public let kernelPort: Int?
+  public let cdp: String?
   public let log: @Sendable (String) -> Void
   public let warn: @Sendable (String) -> Void
   var hostfsIdle = HostfsProtocol.grantIdle
   var hostfsPing = HostfsProtocol.pingInterval
   var kernelOpenTimeout = KernelProtocol.openTimeout
   var tunnelPing = KernelProtocol.pingInterval
+  var cdpReconnectDelay = CDPProtocol.reconnectDelay
 
   public init(
     port: Int = 0,
@@ -31,6 +34,7 @@ public struct LocalProxy: Sendable {
       ProcessInfo.processInfo.environment[ProxySecurity.devOriginsEnvironment]),
     folders: [HostFolder] = [],
     kernelPort: Int? = KernelProtocol.defaultPort,
+    cdp: String? = nil,
     log: @escaping @Sendable (String) -> Void = { _ in },
     warn: @escaping @Sendable (String) -> Void = { _ in }
   ) {
@@ -40,6 +44,7 @@ public struct LocalProxy: Sendable {
     self.extraOrigins = extraOrigins
     self.folders = folders
     self.kernelPort = kernelPort
+    self.cdp = cdp
     self.log = log
     self.warn = warn
   }
@@ -63,6 +68,7 @@ public struct LocalProxy: Sendable {
       middleware: ProxyGateMiddleware(key: key, extraOrigins: extraOrigins, port: gate.port))
     var proxy = RawFetchProxy(httpClient: httpClient, kernel: gate.kernel)
     proxy.hostfs = !hostfs.folders.isEmpty
+    proxy.cdp = cdp != nil
     router.post(RouterPath(RawFetchProtocol.path)) { [proxy] request, _ in
       try await proxy.respond(to: request)
     }
@@ -94,15 +100,22 @@ public struct LocalProxy: Sendable {
     logger.logLevel = logLevel
     let hostfs = Hostfs(folders: folders, idle: hostfsIdle, pingInterval: hostfsPing, log: log)
     let kernel = KernelState()
-    let gate = TunnelGate(key: key, extraOrigins: extraOrigins, port: boundPort, kernel: kernel)
+    let gate = TunnelGate(
+      key: key, extraOrigins: extraOrigins, port: boundPort, kernel: kernel, cdp: cdp != nil)
     let tunnels = KernelTunnels(log: log, openTimeout: kernelOpenTimeout)
     let listener = KernelListener(
       port: kernelPort, tunnels: tunnels, state: kernel, log: log, warn: warn)
+    let browser = cdp.map {
+      CDPProxy(httpClient: httpClient, browser: $0, reconnectDelay: cdpReconnectDelay, log: log)
+    }
+    var services: [any Service] = [HostfsService(hostfs: hostfs), listener]
+    if let browser { services.append(CDPService(proxy: browser)) }
     return Application(
       router: makeRouter(httpClient: httpClient, gate: gate, hostfs: hostfs),
-      server: KernelTunnelChannel.builder(gate: gate, tunnels: tunnels, ping: tunnelPing),
+      server: KernelTunnelChannel.builder(
+        gate: gate, tunnels: tunnels, ping: tunnelPing, cdp: browser),
       configuration: .init(address: .hostname(host, port: port)),
-      services: [HostfsService(hostfs: hostfs), listener],
+      services: services,
       onServerRunning: { channel in
         boundPort.value = channel.localAddress?.port ?? 0
         await onReady("http://\(host):\(boundPort.value)", await kernel.settled())

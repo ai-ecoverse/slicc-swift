@@ -34,6 +34,7 @@ struct TunnelGate: Sendable {
   let extraOrigins: Set<String>
   let port: BoundPort
   let kernel: KernelState
+  let cdp: Bool
 }
 
 struct KernelStreamError: Error {

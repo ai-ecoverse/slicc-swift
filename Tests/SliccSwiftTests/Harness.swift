@@ -310,6 +310,8 @@ func withHarness(
   hostfsIdle: Duration = HostfsProtocol.grantIdle,
   kernelPort: Int? = nil,
   kernelOpenTimeout: Duration = KernelProtocol.openTimeout,
+  cdp: String? = nil,
+  cdpReconnectDelay: Duration = CDPProtocol.reconnectDelay,
   _ body: @Sendable (Harness) async throws -> Void
 ) async throws {
   let upstreamPort = PortBox()
@@ -327,9 +329,10 @@ func withHarness(
   let proxyClient = RawFetchProxy.makeHTTPClient()
   var proxy = LocalProxy(
     port: 0, key: testKey, extraOrigins: extraOrigins, folders: folders, kernelPort: kernelPort,
-    log: logs.add, warn: warnings.add)
+    cdp: cdp, log: logs.add, warn: warnings.add)
   proxy.hostfsIdle = hostfsIdle
   proxy.kernelOpenTimeout = kernelOpenTimeout
+  proxy.cdpReconnectDelay = cdpReconnectDelay
   let app = proxy.makeApplication(httpClient: proxyClient, logLevel: .critical) { url, kernel in
     await kernelBox.set(kernel ?? -1)
     await proxyPort.set(Int(url.split(separator: ":").last ?? "") ?? 0)

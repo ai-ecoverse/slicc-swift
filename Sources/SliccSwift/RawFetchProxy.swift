@@ -9,6 +9,7 @@ struct RawFetchProxy: Sendable {
   let httpClient: HTTPClient
   var maxRequestBodyBytes = RawFetchProtocol.requestBodyCap
   var hostfs = false
+  var cdp = false
   var kernel: KernelState?
 
   private static let requestHeader = HTTPField.Name(RawFetchProtocol.requestHeader)!
@@ -41,7 +42,7 @@ struct RawFetchProxy: Sendable {
 
   private func probeResponse() -> Response {
     let json = RawFetchProtocol.probeReplyJSON(
-      maxRequestBodyBytes: maxRequestBodyBytes, hostfs: hostfs, kernelPort: kernel?.port)
+      maxRequestBodyBytes: maxRequestBodyBytes, hostfs: hostfs, kernelPort: kernel?.port, cdp: cdp)
     return Response(
       status: .ok,
       headers: [.contentType: "application/json", .cacheControl: "no-store"],
