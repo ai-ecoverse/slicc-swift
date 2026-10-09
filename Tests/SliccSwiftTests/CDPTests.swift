@@ -226,11 +226,11 @@ func waitLog(_ harness: Harness, _ needle: String) async throws {
 @Suite struct CDPTests {
   @Test func debuggerURLIsReadFromTheVersionPayload() throws {
     let body = Data(
-      #"{"Browser":"Chrome","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser/abc"}"#
+      #"{"Browser":"Chrome","webSocketDebuggerUrl":"ws:\/\/127.0.0.1:9222/devtools/browser/abc"}"#
         .utf8)
     #expect(
       try CDPProtocol.debuggerURL(body) == "ws://127.0.0.1:9222/devtools/browser/abc")
-    let secure = Data(#"{"webSocketDebuggerUrl":"wss://browser.test/devtools/browser/a"}"#.utf8)
+    let secure = Data(#"{"webSocketDebuggerUrl":"wss:\/\/browser.test/devtools/browser/a"}"#.utf8)
     #expect(try CDPProtocol.debuggerURL(secure) == "wss://browser.test/devtools/browser/a")
   }
 
