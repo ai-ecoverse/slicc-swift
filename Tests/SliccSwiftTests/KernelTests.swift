@@ -231,8 +231,9 @@ func errorBody(_ reply: HTTPReply) -> String? {
       try await socket.pause()
       try await socket.write(
         "GET /big HTTP/1.1\r\nHost: 8400.kernel.localhost\r\nConnection: close\r\n\r\n")
+      let id = try await page.seen.waitFor { $0.ids.first }
+      _ = try await page.seen.waitFor { ($0.sent[id] ?? 0) > 0 ? true : nil }
       try await Task.sleep(for: .milliseconds(300))
-      let id = try #require(await page.seen.ids.first)
       let sent = await page.seen.sent[id] ?? 0
       let credited = await page.seen.credited[id] ?? 0
       #expect(sent < bigBody.count, "\(sent)")
@@ -310,7 +311,7 @@ func errorBody(_ reply: HTTPReply) -> String? {
       let page = try await TestPage.connect(harness, ports: [5173: .upstream(harness.upstreamPort)])
       let ws = try await WSClient.connect(port: port, path: "/hmr", host: "5173.kernel.localhost")
       #expect(ws.reply.status == 101)
-      let id = try #require(await page.seen.ids.first)
+      let id = try await page.seen.waitFor { $0.ids.first }
       try await page.send(5, id, Array("gone".utf8))
       _ = await ws.inbox.rest()
       #expect(await ws.inbox.isEnded)
@@ -324,7 +325,7 @@ func errorBody(_ reply: HTTPReply) -> String? {
       let reply = try await kernelGet(port)
       #expect(reply.status == 504)
       #expect(reply.text == "kernel port 8400 did not answer\n")
-      let id = try #require(await page.seen.ids.first)
+      let id = try await page.seen.waitFor { $0.ids.first }
       #expect(try await page.seen.waitFor { $0.resets[id] } == "ETIMEDOUT")
       await page.close()
     }

@@ -68,9 +68,10 @@ public enum ProxyIdentity {
     } catch {
       throw Failure(description: "cannot create \(directory): \(error.localizedDescription)")
     }
-    guard try mode(directory) & 0o077 != 0 else { return }
+    let current = try mode(directory) & 0o777
+    guard current != 0o700 else { return }
     try check(chmod(directory, 0o700), "chmod", directory)
-    warn("\(directory) was open to others; it is 0700 now")
+    if current & 0o077 != 0 { warn("\(directory) was open to others; it is 0700 now") }
   }
 
   private static func readKey(_ file: String, warn: (String) -> Void) throws -> String? {

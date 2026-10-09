@@ -214,6 +214,12 @@ func readText(_ path: String) throws -> String {
     #expect(tightened.stderr.contains("\(directory) was open to others; it is 0700 now"))
     #expect(try permissions(file) == 0o600)
     #expect(try permissions(directory) == 0o700)
+    chmod(directory, 0o500)
+    let owner = try await launch(["--port", port], config: config)
+    await owner.stop()
+    #expect(owner.key == fresh.key)
+    #expect(!owner.stderr.contains("was open to others"))
+    #expect(try permissions(directory) == 0o700)
   }
 
   @Test func theDefaultPortIsFixedWithAFreePortAsFallback() async throws {
