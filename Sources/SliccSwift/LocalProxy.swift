@@ -10,24 +10,17 @@ public struct LocalProxy: Sendable {
 
   public static let host = "127.0.0.1"
 
-  static var server: HTTPServerBuilder {
-    .http1(
-      configuration: .init(
-        httpDecoderConfiguration: .init(
-          maxHeaderFieldSize: RawFetchProtocol.maxHeaderBytes,
-          maxHeaderListSize: RawFetchProtocol.maxHeaderBytes
-        )
-      )
-    )
-  }
-
   public let port: Int
   public let key: String
   public let extraOrigins: Set<String>
   public let folders: [HostFolder]
+  public let kernelPort: Int?
   public let log: @Sendable (String) -> Void
+  public let warn: @Sendable (String) -> Void
   var hostfsIdle = HostfsProtocol.grantIdle
   var hostfsPing = HostfsProtocol.pingInterval
+  var kernelOpenTimeout = KernelProtocol.openTimeout
+  var tunnelPing = KernelProtocol.pingInterval
 
   public init(
     port: Int = 0,
@@ -35,13 +28,17 @@ public struct LocalProxy: Sendable {
     extraOrigins: Set<String> = ProxySecurity.parseOrigins(
       ProcessInfo.processInfo.environment[ProxySecurity.devOriginsEnvironment]),
     folders: [HostFolder] = [],
-    log: @escaping @Sendable (String) -> Void = { _ in }
+    kernelPort: Int? = KernelProtocol.defaultPort,
+    log: @escaping @Sendable (String) -> Void = { _ in },
+    warn: @escaping @Sendable (String) -> Void = { _ in }
   ) {
     self.port = port
     self.key = key
     self.extraOrigins = extraOrigins
     self.folders = folders
+    self.kernelPort = kernelPort
     self.log = log
+    self.warn = warn
   }
 
   public static func launchURL(page: String = defaultPage, proxyURL: String, key: String) -> String
@@ -55,12 +52,13 @@ public struct LocalProxy: Sendable {
     return "\(base)#proxy=\(encode(proxyURL))&key=\(encode(key))"
   }
 
-  func makeRouter(httpClient: HTTPClient, port: BoundPort, hostfs: Hostfs) -> Router<
+  func makeRouter(httpClient: HTTPClient, gate: TunnelGate, hostfs: Hostfs) -> Router<
     BasicRequestContext
   > {
     let router = Router()
-    router.add(middleware: ProxyGateMiddleware(key: key, extraOrigins: extraOrigins, port: port))
-    var proxy = RawFetchProxy(httpClient: httpClient)
+    router.add(
+      middleware: ProxyGateMiddleware(key: key, extraOrigins: extraOrigins, port: gate.port))
+    var proxy = RawFetchProxy(httpClient: httpClient, kernel: gate.kernel)
     proxy.hostfs = !hostfs.folders.isEmpty
     router.post(RouterPath(RawFetchProtocol.path)) { [proxy] request, _ in
       try await proxy.respond(to: request)
@@ -85,21 +83,26 @@ public struct LocalProxy: Sendable {
   func makeApplication(
     httpClient: HTTPClient,
     logLevel: Logger.Level = .warning,
-    onReady: @escaping @Sendable (_ proxyURL: String) async -> Void
+    onReady: @escaping @Sendable (_ proxyURL: String, _ kernelPort: Int?) async -> Void
   ) -> some ApplicationProtocol {
     let host = Self.host
     let boundPort = BoundPort()
     var logger = Logger(label: "slicc-swift")
     logger.logLevel = logLevel
     let hostfs = Hostfs(folders: folders, idle: hostfsIdle, pingInterval: hostfsPing, log: log)
+    let kernel = KernelState()
+    let gate = TunnelGate(key: key, extraOrigins: extraOrigins, port: boundPort, kernel: kernel)
+    let tunnels = KernelTunnels(log: log, openTimeout: kernelOpenTimeout)
+    let listener = KernelListener(
+      port: kernelPort, tunnels: tunnels, state: kernel, log: log, warn: warn)
     return Application(
-      router: makeRouter(httpClient: httpClient, port: boundPort, hostfs: hostfs),
-      server: Self.server,
+      router: makeRouter(httpClient: httpClient, gate: gate, hostfs: hostfs),
+      server: KernelTunnelChannel.builder(gate: gate, tunnels: tunnels, ping: tunnelPing),
       configuration: .init(address: .hostname(host, port: port)),
-      services: [HostfsService(hostfs: hostfs)],
+      services: [HostfsService(hostfs: hostfs), listener],
       onServerRunning: { channel in
         boundPort.value = channel.localAddress?.port ?? 0
-        await onReady("http://\(host):\(boundPort.value)")
+        await onReady("http://\(host):\(boundPort.value)", await kernel.settled())
       },
       logger: logger
     )
@@ -108,9 +111,15 @@ public struct LocalProxy: Sendable {
   public func run(onReady: @escaping @Sendable (_ proxyURL: String) async -> Void = { _ in })
     async throws
   {
+    try await run(onListening: { proxyURL, _ in await onReady(proxyURL) })
+  }
+
+  public func run(
+    onListening: @escaping @Sendable (_ proxyURL: String, _ kernelPort: Int?) async -> Void
+  ) async throws {
     let httpClient = RawFetchProxy.makeHTTPClient()
     do {
-      try await makeApplication(httpClient: httpClient, onReady: onReady).runService()
+      try await makeApplication(httpClient: httpClient, onReady: onListening).runService()
     } catch {
       try? await httpClient.shutdown()
       throw error

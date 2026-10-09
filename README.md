@@ -1,6 +1,6 @@
 # slicc-swift
 
-SLICC's local proxy for macOS and iOS: the Swift twin of [slicc-node](https://github.com/ai-ecoverse/slicc-node). The new SLICC on `*.sliccy.ai` sends program traffic (curl, git, npm) through the kernel's `localProxyTransport({ url, key })`, which talks to this proxy on loopback. The proxy can also share folders from the user's disk with the page ([Host folders](#host-folders)).
+SLICC's local proxy for macOS and iOS: the Swift twin of [slicc-node](https://github.com/ai-ecoverse/slicc-node). The new SLICC on `*.sliccy.ai` sends program traffic (curl, git, npm) through the kernel's `localProxyTransport({ url, key })`, which talks to this proxy on loopback. The proxy can also share folders from the user's disk with the page ([Host folders](#host-folders)) and serve the page's kernel servers on `http://<port>.kernel.localhost/` ([Kernel services](#kernel-services)).
 
 ## Launcher
 
@@ -19,8 +19,10 @@ Options:
 - `--port PORT`: default `0`, any free port.
 - `--page URL`: default `https://seven.sliccy.ai/`.
 - `--mount PATH[:NAME][:ro]`: shares a folder with the page, and can be repeated. See [Host folders](#host-folders).
+- `--kernel-port PORT`: the port on `127.0.0.1` for `http://<port>.kernel.localhost/`, default `80`. See [Kernel services](#kernel-services).
+- `--no-kernel`: does not serve the page's kernel on `<port>.kernel.localhost`.
 - `--no-open`: prints the launch URL without opening a browser.
-- `--quiet`: does not log host folder grants and writes to stderr.
+- `--quiet`: does not log host folder grants, writes and kernel requests to stderr.
 
 The binary is not signed or notarized.
 
@@ -36,6 +38,8 @@ try await proxy.run { proxyURL in
 }
 ```
 
+`LocalProxy` also takes `kernelPort` (default `80`, `nil` for off) and `warn`. `run(onListening:)` passes the bound kernel port too, or `nil` when the listener is off or could not bind.
+
 ## Protocol
 
 It's the protocol in [slicc-node's README](https://github.com/ai-ecoverse/slicc-node#protocol), the raw mode of SLICC's `/api/fetch-proxy`. The kernel's `localProxyTransport` and `probeLocalProxy` (`@ai-ecoverse/slicc-kernel` 1.5.0) are the client.
@@ -49,7 +53,7 @@ It's the protocol in [slicc-node's README](https://github.com/ai-ecoverse/slicc-
   - **Body:** the decoded upstream body streams after the head.
   - **Redirects:** not followed.
 - **Decoding:** `gzip`, `x-gzip`, `deflate` and `br` are decoded, including stacked codings. When every coding was undone, `Content-Encoding` and `Content-Length` are dropped. Bodiless responses keep both.
-- **Probe:** `X-Slicc-Raw-Probe: 1` answers `{"rawFetch":1,"requestBodyStreaming":false,"maxRequestBodyBytes":268435456}`. With at least one folder exported, it adds `"hostfs":1`.
+- **Probe:** `X-Slicc-Raw-Probe: 1` answers `{"rawFetch":1,"requestBodyStreaming":false,"maxRequestBodyBytes":268435456}`. With at least one folder exported, it adds `"hostfs":1`. With the [kernel listener](#kernel-services) up, it adds `"kernelTunnel":1,"kernelPort":<port>`.
 - **Errors:** a non-200 status with `X-Proxy-Error: 1` and `{"error":"…"}`. An unreachable upstream is `502 fetch failed: …`, and a `206` that came back encoded is `502` as well.
 
 ## Security gate
@@ -57,7 +61,7 @@ It's the protocol in [slicc-node's README](https://github.com/ai-ecoverse/slicc-
 The checks run in this order:
 
 1. **Host:** the `Host` header must be `127.0.0.1`, `localhost` or `[::1]` with the bound port. This blocks DNS rebinding. Otherwise `403 host not allowed`.
-2. **Path:** `/api/fetch-proxy` (`POST`) and the [host folder](#host-folders) paths pass. Anything else gets `404 not found`.
+2. **Path:** `/api/fetch-proxy` (`POST`) and the [host folder](#host-folders) paths pass, and `/api/kernel-tunnel` takes only a WebSocket upgrade (see [Kernel services](#kernel-services)). Anything else gets `404 not found`.
 3. **Origin:** the request needs an `Origin` of the form `https://<label>.sliccy.ai`, which covers `seven` and the branch hosts but not `www` or the apex. An origin listed in `SLICC_PROXY_ALLOWED_ORIGINS` (comma-separated, for local development) also passes. Otherwise `403 origin not allowed`.
 4. **Preflight:** an `OPTIONS` request answers `204` with `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS`, `Access-Control-Allow-Headers: Content-Type, X-Bridge-Token, X-Slicc-Raw-Request, X-Slicc-Raw-Probe, X-Hostfs-Token, X-Hostfs-Request`, and `Access-Control-Max-Age: 600`. It adds `Access-Control-Allow-Private-Network: true` when the browser asks for Private or Local Network Access.
 5. **Method:** each path takes only its own methods. Any other gets `405`, with `Allow` listing them and `OPTIONS`.
@@ -138,9 +142,52 @@ The root can't be removed or renamed (`EBUSY`). `attr` is `{"kind":"file"|"direc
 | `ENOSPC`, `EFBIG` | 507 |
 | anything else (`EIO`, `EMFILE`, …) | 500 |
 
+## Kernel services
+
+This is slicc-node's [kernel services](https://github.com/ai-ecoverse/slicc-node#kernel-services) contract (slicc-node#19). A kernel port `N` in the page is `http://N.kernel.localhost/`; the proxy carries top-level navigations and WebSockets (vite HMR) there through a tunnel into the page, which calls `kernel.dial({ port: N })`.
+
+**Listener.**
+
+- It listens on `127.0.0.1:80` by default, never another interface. `--kernel-port` picks another port, and then URLs carry it: `http://8400.kernel.localhost:8080/`.
+- If the port cannot be bound, it warns `kernel services are off: cannot listen on 127.0.0.1:80 (EADDRINUSE); try --kernel-port` and runs on without it. The probe then leaves out `kernelTunnel`.
+- It reads the first request head (64 KiB at most, within 30 s) and takes exactly one `Host` of the form `<1–65535>.kernel.localhost`, with no port or the listener's own port, no leading zeros and no trailing dot. It opens a stream to that kernel port, sends what it has read and then pipes bytes both ways, so keep-alive, chunked bodies and WebSocket upgrades pass through.
+
+**Errors** are plain text with `X-Proxy-Error: 1` and `Connection: close`:
+
+| case | answer |
+| --- | --- |
+| `Host` not `<port>.kernel.localhost` | `421` |
+| malformed request line, or not exactly one `Host` | `400` |
+| head over 64 KiB | `431` |
+| no page connected | `502 no seven page connected` |
+| the page answers `RESET` with `ECONNREFUSED` | `502 nothing listening on kernel port N` |
+| the page answers `RESET` with another reason | `502 kernel port N: <reason>` |
+| no `OPENED` within 10 s | `504 kernel port N did not answer` |
+
+**Tunnel.** The page opens a WebSocket to `ws://127.0.0.1:<proxy port>/api/kernel-tunnel` with the subprotocols `slicc.kernel-tunnel.v1` and `slicc.key.<key>`. Before upgrading, the proxy checks the loopback `Host` (`403 host not allowed`), the path and that the listener is up (`404`), the `Origin` as in the [gate](#security-gate) (`403 origin not allowed`), that `slicc.kernel-tunnel.v1` is offered (`400`) and the key in constant time (`403 proxy key missing or wrong`). Refusals are `{"error":…}` without CORS headers. It selects `slicc.kernel-tunnel.v1`, so the key is never echoed.
+
+Every message is binary: a `u8` type, a big-endian `u32` stream id, then the payload. The proxy opens every stream and numbers them from 1.
+
+| type | direction | payload |
+| --- | --- | --- |
+| `1` OPEN | proxy → page | `u16` BE kernel port |
+| `2` OPENED | page → proxy | empty |
+| `3` DATA | both | 1 to 65 536 bytes |
+| `4` END | both | empty, a half-close |
+| `5` RESET | both | UTF-8 reason, such as `ECONNREFUSED` |
+| `6` CREDIT | both | `u32` BE count of bytes consumed, at least 1 |
+
+- **Flow control:** each side may have at most 256 KiB of DATA per stream and direction that the other has not credited. The proxy credits bytes once the browser's socket has taken them, and stops reading the browser while its own window is empty.
+- **Lifecycle:** the page answers OPEN with OPENED or RESET. A stream ends after END both ways or a RESET from either side. Frames for an unknown id are ignored.
+- **Violations:** DATA or END before OPENED, DATA or END after the page's END, empty DATA, DATA past the window or CREDIT past it reset the stream with `EPROTO`. A text message closes the tunnel with `1003`, an unknown type, a short or malformed frame or OPEN from the page with `1002`, and a message over 65 541 bytes with `1009`. Closing the tunnel resets its streams.
+- **Liveness:** the proxy pings every 15 s and drops a tunnel that misses a pong.
+- **Several tabs:** the most recently connected tunnel takes new streams. When it closes, the one before it that is still open takes over.
+
+Any local process, and any web page Chrome lets reach loopback, can reach kernel services on the kernel port, like any dev server on localhost. Run with `--no-kernel` to keep them inside the page.
+
 ## Development
 
-`npm run lint` runs the slicc lint tools and `swift format lint`. `swift test` runs the integration tests, which start a loopback upstream and the proxy and cover the protocol, the gate and host folders (traversal and symlink escapes, read-only tokens, foreign origins, token expiry, in-place writes and the watch stream). Releases are GitHub tags only, via semantic-release.
+`npm run lint` runs the slicc lint tools and `swift format lint`. `swift test` runs the integration tests, which start a loopback upstream and the proxy and cover the protocol, the gate, host folders (traversal and symlink escapes, read-only tokens, foreign origins, token expiry, in-place writes and the watch stream) and kernel services (the `Host` allowlist, the tunnel gate, forwarded HTTP and WebSocket exchanges, credits and backpressure, resets, protocol violations and several tabs, against a simulated page). Releases are GitHub tags only, via semantic-release.
 
 ## What else is in SLICC's Swift code
 
