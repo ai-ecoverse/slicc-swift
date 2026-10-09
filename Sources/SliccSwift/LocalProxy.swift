@@ -10,7 +10,8 @@ public struct LocalProxy: Sendable {
 
   public static let host = "127.0.0.1"
 
-  public let port: Int
+  public var port: Int
+  public let portFallback: Bool
   public let key: String
   public let extraOrigins: Set<String>
   public let folders: [HostFolder]
@@ -24,6 +25,7 @@ public struct LocalProxy: Sendable {
 
   public init(
     port: Int = 0,
+    portFallback: Bool = false,
     key: String = ProxySecurity.mintKey(),
     extraOrigins: Set<String> = ProxySecurity.parseOrigins(
       ProcessInfo.processInfo.environment[ProxySecurity.devOriginsEnvironment]),
@@ -33,6 +35,7 @@ public struct LocalProxy: Sendable {
     warn: @escaping @Sendable (String) -> Void = { _ in }
   ) {
     self.port = port
+    self.portFallback = portFallback
     self.key = key
     self.extraOrigins = extraOrigins
     self.folders = folders
@@ -119,11 +122,25 @@ public struct LocalProxy: Sendable {
   ) async throws {
     let httpClient = RawFetchProxy.makeHTTPClient()
     do {
-      try await makeApplication(httpClient: httpClient, onReady: onListening).runService()
+      do {
+        try await makeApplication(httpClient: httpClient, onReady: onListening).runService()
+      } catch  where portFallback && port != 0 && Self.addressInUse(error) {
+        warn(
+          "port \(port) is taken; using a free port, so pages from an earlier launch cannot reconnect"
+        )
+        var fallback = self
+        fallback.port = 0
+        try await fallback.makeApplication(httpClient: httpClient, onReady: onListening)
+          .runService()
+      }
     } catch {
       try? await httpClient.shutdown()
       throw error
     }
     try await httpClient.shutdown()
+  }
+
+  public static func addressInUse(_ error: any Error) -> Bool {
+    (error as? IOError)?.errnoCode == EADDRINUSE
   }
 }
