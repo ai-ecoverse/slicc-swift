@@ -189,8 +189,14 @@ actor WatchLines {
     for waiter in pending { waiter.resume() }
   }
 
-  func wait() async {
-    await withCheckedContinuation { waiters.append($0) }
+  func until(_ match: @Sendable ([String: Any]?, String) -> Bool) async -> String {
+    while true {
+      for line in lines {
+        let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        if match(object, line) { return line }
+      }
+      await withCheckedContinuation { waiters.append($0) }
+    }
   }
 }
 
@@ -201,13 +207,7 @@ struct Watch: Sendable {
   let reader: Task<Void, Never>
 
   func until(_ match: @Sendable ([String: Any]?, String) -> Bool) async throws -> String {
-    while true {
-      for line in await lines.lines {
-        let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
-        if match(object, line) { return line }
-      }
-      await lines.wait()
-    }
+    await lines.until(match)
   }
 
   func close() { reader.cancel() }
@@ -215,11 +215,12 @@ struct Watch: Sendable {
 
 func withHostfs(
   idle: Duration = HostfsProtocol.grantIdle,
+  ping: Duration = HostfsProtocol.pingInterval,
   _ body: @Sendable (HostfsClient) async throws -> Void
 ) async throws {
   let fixture = try Fixture.make()
   defer { fixture.remove() }
-  try await withHarness(folders: fixture.folders, hostfsIdle: idle) { harness in
+  try await withHarness(folders: fixture.folders, hostfsIdle: idle, hostfsPing: ping) { harness in
     try await body(HostfsClient(harness: harness, fixture: fixture))
   }
 }
@@ -344,7 +345,7 @@ func names(_ listing: [String: Any]) -> [String] {
   }
 
   @Test func idleTokensExpireButAWatchKeepsThemAlive() async throws {
-    try await withHostfs(idle: .milliseconds(400)) { fs in
+    try await withHostfs(idle: .milliseconds(400), ping: .milliseconds(800)) { fs in
       let idle = try await fs.token("project")
       let opened = try await fs.ok(
         idle, ["op": "open", "path": "idle.txt", "create": true, "write": true])
@@ -354,6 +355,7 @@ func names(_ listing: [String: Any]) -> [String] {
       let stream = try await fs.watch([watched])
       try fs.fixture.write(fs.fixture.folder + "/watch-ready.txt", "ready")
       _ = try await stream.until { object, _ in object?["mount"] as? String == "project" }
+      _ = try await stream.until { _, line in line == #"{"ping":1}"# }
       try await fs.ok(watched, ["op": "stat", "path": ""])
       stream.close()
     }

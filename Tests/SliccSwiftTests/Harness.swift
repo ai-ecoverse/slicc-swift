@@ -232,12 +232,25 @@ func upstreamServer() -> HTTPServerBuilder {
           maxHeaderListSize: RawFetchProtocol.maxHeaderBytes))))
 }
 
-final class LogLines: Sendable {
-  private let box = NIOLockedValueBox<[String]>([])
+actor LogLines {
+  private var stored: [String] = []
+  private var waiters: [CheckedContinuation<Void, Never>] = []
 
-  var lines: [String] { box.withLockedValue { $0 } }
+  var lines: [String] { stored }
 
-  func add(_ line: String) { box.withLockedValue { $0.append(line) } }
+  func add(_ line: String) {
+    stored.append(line)
+    let pending = waiters
+    waiters.removeAll()
+    for waiter in pending { waiter.resume() }
+  }
+
+  func until(_ match: @Sendable (String) -> Bool) async {
+    while true {
+      if stored.contains(where: match) { return }
+      await withCheckedContinuation { waiters.append($0) }
+    }
+  }
 }
 
 struct Harness {
@@ -312,6 +325,7 @@ func withHarness(
   kernelOpenTimeout: Duration = KernelProtocol.openTimeout,
   cdp: String? = nil,
   cdpReconnectDelay: Duration = CDPProtocol.reconnectDelay,
+  hostfsPing: Duration = HostfsProtocol.pingInterval,
   _ body: @Sendable (Harness) async throws -> Void
 ) async throws {
   let upstreamPort = PortBox()
@@ -329,8 +343,10 @@ func withHarness(
   let proxyClient = RawFetchProxy.makeHTTPClient()
   var proxy = LocalProxy(
     port: 0, key: testKey, extraOrigins: extraOrigins, folders: folders, kernelPort: kernelPort,
-    cdp: cdp, log: logs.add, warn: warnings.add)
+    cdp: cdp, log: { line in Task { await logs.add(line) } },
+    warn: { line in Task { await warnings.add(line) } })
   proxy.hostfsIdle = hostfsIdle
+  proxy.hostfsPing = hostfsPing
   proxy.kernelOpenTimeout = kernelOpenTimeout
   proxy.cdpReconnectDelay = cdpReconnectDelay
   let app = proxy.makeApplication(httpClient: proxyClient, logLevel: .critical) { url, kernel in

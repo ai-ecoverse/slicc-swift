@@ -52,7 +52,7 @@ func errorBody(_ reply: HTTPReply) -> String? {
     try await withHarness(kernelPort: taken) { harness in
       #expect(harness.kernelPort == nil)
       #expect(
-        harness.warnings.lines == [
+        await harness.warnings.lines == [
           "kernel services are off: cannot listen on 127.0.0.1:\(taken) (EADDRINUSE); try --kernel-port"
         ])
       let probe = try await probeObject(harness)
@@ -161,7 +161,7 @@ func errorBody(_ reply: HTTPReply) -> String? {
       #expect(await page.seen.opens == [8400])
       socket.close()
       await page.close()
-      #expect(harness.logs.lines.contains("kernel GET 8400"))
+      #expect(await harness.logs.lines.contains("kernel GET 8400"))
     }
   }
 
@@ -207,7 +207,8 @@ func errorBody(_ reply: HTTPReply) -> String? {
       #expect(try await kernelGet(port).status == 200)
       #expect(try await older.seen.waitFor { $0.opens == [8400] ? true : nil })
       await older.close()
-      #expect(harness.logs.lines.contains { $0.hasPrefix("kernel tunnel from \(hostedOrigin)") })
+      #expect(
+        await harness.logs.lines.contains { $0.hasPrefix("kernel tunnel from \(hostedOrigin)") })
     }
   }
 
@@ -383,8 +384,8 @@ func errorBody(_ reply: HTTPReply) -> String? {
       let page = try await TestPage.connect(harness)
       await page.close()
       let closed = "kernel tunnel from \(hostedOrigin) closed (0 open)"
-      _ = try await page.seen.waitFor { _ in harness.logs.lines.contains(closed) ? true : nil }
-      #expect(harness.logs.lines.contains("kernel tunnel from \(hostedOrigin) (1 open)"))
+      await harness.logs.until { $0 == closed }
+      #expect(await harness.logs.lines.contains("kernel tunnel from \(hostedOrigin) (1 open)"))
     }
   }
 }

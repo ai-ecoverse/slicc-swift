@@ -234,11 +234,7 @@ func withChrome(
 }
 
 func waitLog(_ harness: Harness, _ needle: String) async throws {
-  for _ in 0..<1000 {
-    if harness.logs.lines.contains(where: { $0.contains(needle) }) { return }
-    try await Task.sleep(for: .milliseconds(5))
-  }
-  throw CancellationError()
+  await harness.logs.until { $0.contains(needle) }
 }
 
 @Suite struct CDPTests {
