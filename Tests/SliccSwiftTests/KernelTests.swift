@@ -201,11 +201,11 @@ func errorBody(_ reply: HTTPReply) -> String? {
       let older = try await TestPage.connect(harness, ports: ports)
       let newer = try await TestPage.connect(harness, ports: ports)
       #expect(try await kernelGet(port).status == 200)
-      #expect(await newer.seen.opens == [8400])
+      #expect(try await newer.seen.waitFor { $0.opens == [8400] ? true : nil })
       #expect(await older.seen.opens == [])
       await newer.close()
       #expect(try await kernelGet(port).status == 200)
-      #expect(await older.seen.opens == [8400])
+      #expect(try await older.seen.waitFor { $0.opens == [8400] ? true : nil })
       await older.close()
       #expect(harness.logs.lines.contains { $0.hasPrefix("kernel tunnel from \(hostedOrigin)") })
     }

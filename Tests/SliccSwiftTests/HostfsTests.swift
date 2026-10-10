@@ -180,8 +180,18 @@ struct HostfsClient: Sendable {
 
 actor WatchLines {
   private(set) var lines: [String] = []
+  private var waiters: [CheckedContinuation<Void, Never>] = []
 
-  func add(_ line: String) { lines.append(line) }
+  func add(_ line: String) {
+    lines.append(line)
+    let pending = waiters
+    waiters.removeAll()
+    for waiter in pending { waiter.resume() }
+  }
+
+  func wait() async {
+    await withCheckedContinuation { waiters.append($0) }
+  }
 }
 
 struct Watch: Sendable {
@@ -191,15 +201,13 @@ struct Watch: Sendable {
   let reader: Task<Void, Never>
 
   func until(_ match: @Sendable ([String: Any]?, String) -> Bool) async throws -> String {
-    for _ in 0..<200 {
+    while true {
       for line in await lines.lines {
         let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
         if match(object, line) { return line }
       }
-      try await Task.sleep(for: .milliseconds(50))
+      await lines.wait()
     }
-    Issue.record("no matching line in \(await lines.lines)")
-    return ""
   }
 
   func close() { reader.cancel() }
@@ -344,7 +352,8 @@ func names(_ listing: [String: Any]) -> [String] {
       #expect(try await fs.op(idle, ["op": "release", "fh": opened["fh"] ?? 0]).status == 403)
       let watched = try await fs.token("project")
       let stream = try await fs.watch([watched])
-      try await Task.sleep(for: .milliseconds(800))
+      try fs.fixture.write(fs.fixture.folder + "/watch-ready.txt", "ready")
+      _ = try await stream.until { object, _ in object?["mount"] as? String == "project" }
       try await fs.ok(watched, ["op": "stat", "path": ""])
       stream.close()
     }
@@ -630,7 +639,6 @@ func names(_ listing: [String: Any]) -> [String] {
       #expect(stream.status == 200)
       #expect(stream.headers.first(name: "content-type") == "application/x-ndjson")
       #expect(stream.headers.first(name: "x-content-type-options") == "nosniff")
-      try await Task.sleep(for: .milliseconds(300))
       try FileManager.default.createDirectory(
         atPath: fs.fixture.folder + "/watched", withIntermediateDirectories: true)
       try fs.fixture.write(fs.fixture.folder + "/watched/a.txt", "a")

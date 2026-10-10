@@ -45,97 +45,103 @@ actor ChromeHold {
   }
 }
 
-final class ChromeDouble: Sendable {
+actor ChromeDouble {
   let hold = ChromeHold()
-  private let hits = NIOLockedValueBox(0)
-  private let failAfter = NIOLockedValueBox<Int?>(nil)
-  private let path = NIOLockedValueBox("devtools/browser/one")
-  private let secureSocket = NIOLockedValueBox(false)
-  private let advertised = NIOLockedValueBox<String?>(nil)
-  private let opened = NIOLockedValueBox<[String]>([])
-  private let received = NIOLockedValueBox<[String: [String]]>([:])
-  private let sinks = NIOLockedValueBox<[String: AsyncStream<String>.Continuation]>([:])
+  private var hits = 0
+  private var failAfter: Int?
+  private var path = "devtools/browser/one"
+  private var secureSocket = false
+  private var advertised: String?
+  private var opened: [String] = []
+  private var received: [String: [String]] = [:]
+  private var sinks: [String: AsyncStream<String>.Continuation] = [:]
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  private func signal() {
+    let pending = waiters
+    waiters.removeAll()
+    for waiter in pending { waiter.resume() }
+  }
+
+  private func wait() async {
+    await withCheckedContinuation { waiters.append($0) }
+  }
 
   func bump() -> Int {
-    hits.withLockedValue { value in
-      value += 1
-      return value
-    }
+    hits += 1
+    signal()
+    return hits
   }
 
-  func hitCount() -> Int { hits.withLockedValue { $0 } }
+  func hitCount() -> Int { hits }
 
-  func setFailAfter(_ value: Int?) { failAfter.withLockedValue { $0 = value } }
+  func setFailAfter(_ value: Int?) { failAfter = value }
 
   func rejects(_ hit: Int) -> Bool {
-    failAfter.withLockedValue { limit in
-      guard let limit else { return false }
-      return hit > limit
-    }
+    guard let failAfter else { return false }
+    return hit > failAfter
   }
 
-  var currentPath: String { path.withLockedValue { $0 } }
+  var currentPath: String { path }
 
-  func setPath(_ value: String) { path.withLockedValue { $0 = value } }
+  func setPath(_ value: String) { path = value }
 
-  func setSecureSocket(_ value: Bool) { secureSocket.withLockedValue { $0 = value } }
+  func setSecureSocket(_ value: Bool) { secureSocket = value }
 
-  func servesSecure() -> Bool { secureSocket.withLockedValue { $0 } }
+  func servesSecure() -> Bool { secureSocket }
 
-  func noteAdvertised(_ url: String) { advertised.withLockedValue { $0 = url } }
+  func noteAdvertised(_ url: String) {
+    advertised = url
+    signal()
+  }
 
-  func advertisedURL() -> String? { advertised.withLockedValue { $0 } }
+  func advertisedURL() -> String? { advertised }
 
   func attach(_ path: String, _ sink: AsyncStream<String>.Continuation) {
-    opened.withLockedValue { $0.append(path) }
-    sinks.withLockedValue { box in
-      box[path]?.finish()
-      box[path] = sink
-    }
+    opened.append(path)
+    sinks[path]?.finish()
+    sinks[path] = sink
+    signal()
   }
 
   func append(_ path: String, _ text: String) {
-    received.withLockedValue { $0[path, default: []].append(text) }
+    received[path, default: []].append(text)
+    signal()
   }
 
-  func texts(_ path: String) -> [String] { received.withLockedValue { $0[path] ?? [] } }
+  func texts(_ path: String) -> [String] { received[path] ?? [] }
 
   func send(_ path: String, _ text: String) {
-    sinks.withLockedValue { _ = $0[path]?.yield(text) }
+    _ = sinks[path]?.yield(text)
   }
 
   func drop(_ path: String) {
-    sinks.withLockedValue { box in
-      box[path]?.finish()
-      box[path] = nil
-    }
+    sinks[path]?.finish()
+    sinks[path] = nil
   }
 
-  func isOpen(_ path: String) -> Bool { opened.withLockedValue { $0.contains(path) } }
+  func isOpen(_ path: String) -> Bool { opened.contains(path) }
 
   func waitTexts(_ path: String, _ count: Int) async throws -> [String] {
-    for _ in 0..<1000 {
+    while true {
       let found = texts(path)
       if found.count >= count { return found }
-      try await Task.sleep(for: .milliseconds(5))
+      await wait()
     }
-    throw CancellationError()
   }
 
   func waitOpen(_ path: String) async throws {
-    for _ in 0..<1000 {
+    while true {
       if isOpen(path) { return }
-      try await Task.sleep(for: .milliseconds(5))
+      await wait()
     }
-    throw CancellationError()
   }
 
   func waitHits(_ count: Int) async throws {
-    for _ in 0..<2000 {
+    while true {
       if hitCount() >= count { return }
-      try await Task.sleep(for: .milliseconds(5))
+      await wait()
     }
-    throw CancellationError()
   }
 }
 
@@ -144,12 +150,12 @@ func chromeRouter(_ chrome: ChromeDouble, _ ports: PortBox) -> Router<BasicWebSo
   let router = Router(context: BasicWebSocketRequestContext.self)
   router.get("/json/version") { _, _ in
     await chrome.hold.wait()
-    let hit = chrome.bump()
-    if chrome.rejects(hit) { return Response(status: .internalServerError) }
+    let hit = await chrome.bump()
+    if await chrome.rejects(hit) { return Response(status: .internalServerError) }
     let port = await ports.wait()
-    let scheme = chrome.servesSecure() ? "wss" : "ws"
-    let url = "\(scheme)://127.0.0.1:\(port)/\(chrome.currentPath)"
-    chrome.noteAdvertised(url)
+    let scheme = await chrome.servesSecure() ? "wss" : "ws"
+    let url = "\(scheme)://127.0.0.1:\(port)/\(await chrome.currentPath)"
+    await chrome.noteAdvertised(url)
     let json = "{\"Browser\":\"Chrome\",\"webSocketDebuggerUrl\":\"\(url)\"}"
     return Response(
       status: .ok, headers: [.contentType: "application/json"],
@@ -158,13 +164,13 @@ func chromeRouter(_ chrome: ChromeDouble, _ ports: PortBox) -> Router<BasicWebSo
   for name in ["devtools/browser/one", "devtools/browser/two"] {
     router.ws("/\(name)") { inbound, outbound, _ in
       let (queue, sink) = AsyncStream<String>.makeStream()
-      chrome.attach(name, sink)
+      await chrome.attach(name, sink)
       await withTaskGroup(of: Void.self) { group in
         group.addTask {
           do {
             for try await frame in inbound {
               guard frame.opcode == .text else { continue }
-              chrome.append(name, String(buffer: frame.data))
+              await chrome.append(name, String(buffer: frame.data))
             }
           } catch {}
           sink.finish()
@@ -218,8 +224,8 @@ func withChrome(
       result = .failure(error)
     }
     await chrome.hold.set(false)
-    chrome.drop("devtools/browser/one")
-    chrome.drop("devtools/browser/two")
+    await chrome.drop("devtools/browser/one")
+    await chrome.drop("devtools/browser/two")
     await services.triggerGracefulShutdown()
     try await group.waitForAll()
     return result
@@ -246,17 +252,18 @@ func waitLog(_ harness: Harness, _ needle: String) async throws {
 
   @Test func aSecureDebuggerURLIsRefusedBeforeADial() async throws {
     try await withChrome { harness, chrome in
-      chrome.setSecureSocket(true)
+      await chrome.setSecureSocket(true)
       let page = try await cdpClient(harness)
       defer { page.close() }
       #expect(await page.closeCode() == 1000)
-      let url = try #require(chrome.advertisedURL())
+      let advertised = await chrome.advertisedURL()
+      let url = try #require(advertised)
       let message =
         "webSocketDebuggerUrl \(url) is not supported; only ws:// debugging URLs are supported"
       try await waitLog(harness, message)
       try await Task.sleep(for: .milliseconds(200))
-      #expect(chrome.hitCount() == 1)
-      #expect(chrome.isOpen("devtools/browser/one") == false)
+      #expect(await chrome.hitCount() == 1)
+      #expect(await chrome.isOpen("devtools/browser/one") == false)
     }
   }
 
@@ -380,11 +387,11 @@ func waitLog(_ harness: Harness, _ needle: String) async throws {
       #expect(seen == [attach])
       let session =
         #"{"method":"Target.attachedToTarget","params":{"sessionId":"abc"},"sessionId":"abc"}"#
-      chrome.send("devtools/browser/one", session)
-      chrome.send(
+      await chrome.send("devtools/browser/one", session)
+      await chrome.send(
         "devtools/browser/one",
         #"{"method":"Network.webSocketFrameReceived","params":{"response":{"payloadData":"x"}}}"#)
-      chrome.send(
+      await chrome.send(
         "devtools/browser/one", #"{"method":"Network.webSocketFrameSent","params":{}}"#)
       var forwarded: [String] = []
       for _ in 0..<400 {
@@ -434,12 +441,12 @@ func waitLog(_ harness: Harness, _ needle: String) async throws {
       defer { page.close() }
       try await page.send(1, Array(#"{"id":1}"#.utf8))
       _ = try await chrome.waitTexts("devtools/browser/one", 1)
-      chrome.setPath("devtools/browser/two")
-      chrome.drop("devtools/browser/one")
+      await chrome.setPath("devtools/browser/two")
+      await chrome.drop("devtools/browser/one")
       try await ping(page)
       try await chrome.waitOpen("devtools/browser/two")
       #expect(await page.closeCode() == Int(CDPProtocol.upstreamResetCloseCode))
-      #expect(chrome.texts("devtools/browser/two").isEmpty)
+      #expect(await chrome.texts("devtools/browser/two").isEmpty)
     }
   }
 
@@ -450,14 +457,14 @@ func waitLog(_ harness: Harness, _ needle: String) async throws {
       try await first.send(1, Array(#"{"id":1}"#.utf8))
       _ = try await chrome.waitTexts("devtools/browser/one", 1)
       await chrome.hold.set(true)
-      chrome.drop("devtools/browser/one")
+      await chrome.drop("devtools/browser/one")
       try await waitLog(harness, "reconnecting")
       let next = try await cdpClient(harness)
       defer { next.close() }
       #expect(await first.closeCode() == Int(CDPProtocol.supersededCloseCode))
       let created = #"{"id":2,"method":"Target.createTarget","params":{}}"#
       try await next.send(1, Array(created.utf8))
-      chrome.setPath("devtools/browser/two")
+      await chrome.setPath("devtools/browser/two")
       await chrome.hold.set(false)
       let flushed = try await chrome.waitTexts("devtools/browser/two", 1)
       #expect(flushed == [created])
@@ -468,11 +475,11 @@ func waitLog(_ harness: Harness, _ needle: String) async throws {
 
   @Test func threeFailedRediscoveriesResetTheClientAndTheLoopContinues() async throws {
     try await withChrome(delay: .milliseconds(150)) { harness, chrome in
-      chrome.setFailAfter(1)
+      await chrome.setFailAfter(1)
       let page = try await cdpClient(harness)
       defer { page.close() }
       try await chrome.waitOpen("devtools/browser/one")
-      chrome.drop("devtools/browser/one")
+      await chrome.drop("devtools/browser/one")
       try await chrome.waitHits(2)
       try await ping(page)
       #expect(await page.closeCode() == Int(CDPProtocol.upstreamResetCloseCode))
@@ -482,12 +489,12 @@ func waitLog(_ harness: Harness, _ needle: String) async throws {
 
   @Test func theFirstDiscoveryFailureDoesNotReconnect() async throws {
     try await withChrome(delay: .milliseconds(40)) { harness, chrome in
-      chrome.setFailAfter(0)
+      await chrome.setFailAfter(0)
       let page = try await cdpClient(harness)
       defer { page.close() }
       #expect(await page.closeCode() == 1000)
       try await Task.sleep(for: .milliseconds(300))
-      #expect(chrome.hitCount() == 1)
+      #expect(await chrome.hitCount() == 1)
     }
   }
 }

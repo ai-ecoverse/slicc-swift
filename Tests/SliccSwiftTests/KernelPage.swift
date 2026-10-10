@@ -330,10 +330,22 @@ actor PageSeen {
   var credited: [UInt32: Int] = [:]
   var resets: [UInt32: String] = [:]
   var closeCode: Int?
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  private func signal() {
+    let pending = waiters
+    waiters.removeAll()
+    for waiter in pending { waiter.resume() }
+  }
+
+  private func wait() async {
+    await withCheckedContinuation { waiters.append($0) }
+  }
 
   func open(_ id: UInt32, _ port: Int) {
     opens.append(port)
     ids.append(id)
+    signal()
   }
 
   enum Counter { case received, sent, credited }
@@ -344,18 +356,24 @@ actor PageSeen {
     case .sent: sent[id, default: 0] += count
     case .credited: credited[id, default: 0] += count
     }
+    signal()
   }
 
-  func reset(_ id: UInt32, _ reason: String) { resets[id] = reason }
+  func reset(_ id: UInt32, _ reason: String) {
+    resets[id] = reason
+    signal()
+  }
 
-  func closed(_ code: Int?) { closeCode = code }
+  func closed(_ code: Int?) {
+    closeCode = code
+    signal()
+  }
 
   func waitFor<T: Sendable>(_ probe: @Sendable (isolated PageSeen) -> T?) async throws -> T {
-    for _ in 0..<1000 {
+    while true {
       if let value = probe(self) { return value }
-      try await Task.sleep(for: .milliseconds(5))
+      await wait()
     }
-    throw CancellationError()
   }
 }
 
