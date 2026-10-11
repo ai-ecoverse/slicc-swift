@@ -180,8 +180,24 @@ struct HostfsClient: Sendable {
 
 actor WatchLines {
   private(set) var lines: [String] = []
+  private var waiters: [CheckedContinuation<Void, Never>] = []
 
-  func add(_ line: String) { lines.append(line) }
+  func add(_ line: String) {
+    lines.append(line)
+    let pending = waiters
+    waiters.removeAll()
+    for waiter in pending { waiter.resume() }
+  }
+
+  func until(_ match: @Sendable ([String: Any]?, String) -> Bool) async -> String {
+    while true {
+      for line in lines {
+        let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        if match(object, line) { return line }
+      }
+      await withCheckedContinuation { waiters.append($0) }
+    }
+  }
 }
 
 struct Watch: Sendable {
@@ -191,15 +207,7 @@ struct Watch: Sendable {
   let reader: Task<Void, Never>
 
   func until(_ match: @Sendable ([String: Any]?, String) -> Bool) async throws -> String {
-    for _ in 0..<200 {
-      for line in await lines.lines {
-        let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
-        if match(object, line) { return line }
-      }
-      try await Task.sleep(for: .milliseconds(50))
-    }
-    Issue.record("no matching line in \(await lines.lines)")
-    return ""
+    await lines.until(match)
   }
 
   func close() { reader.cancel() }
@@ -207,11 +215,12 @@ struct Watch: Sendable {
 
 func withHostfs(
   idle: Duration = HostfsProtocol.grantIdle,
+  ping: Duration = HostfsProtocol.pingInterval,
   _ body: @Sendable (HostfsClient) async throws -> Void
 ) async throws {
   let fixture = try Fixture.make()
   defer { fixture.remove() }
-  try await withHarness(folders: fixture.folders, hostfsIdle: idle) { harness in
+  try await withHarness(folders: fixture.folders, hostfsIdle: idle, hostfsPing: ping) { harness in
     try await body(HostfsClient(harness: harness, fixture: fixture))
   }
 }
@@ -336,7 +345,7 @@ func names(_ listing: [String: Any]) -> [String] {
   }
 
   @Test func idleTokensExpireButAWatchKeepsThemAlive() async throws {
-    try await withHostfs(idle: .milliseconds(400)) { fs in
+    try await withHostfs(idle: .milliseconds(400), ping: .milliseconds(800)) { fs in
       let idle = try await fs.token("project")
       let opened = try await fs.ok(
         idle, ["op": "open", "path": "idle.txt", "create": true, "write": true])
@@ -344,7 +353,9 @@ func names(_ listing: [String: Any]) -> [String] {
       #expect(try await fs.op(idle, ["op": "release", "fh": opened["fh"] ?? 0]).status == 403)
       let watched = try await fs.token("project")
       let stream = try await fs.watch([watched])
-      try await Task.sleep(for: .milliseconds(800))
+      try fs.fixture.write(fs.fixture.folder + "/watch-ready.txt", "ready")
+      _ = try await stream.until { object, _ in object?["mount"] as? String == "project" }
+      _ = try await stream.until { _, line in line == #"{"ping":1}"# }
       try await fs.ok(watched, ["op": "stat", "path": ""])
       stream.close()
     }
@@ -630,7 +641,6 @@ func names(_ listing: [String: Any]) -> [String] {
       #expect(stream.status == 200)
       #expect(stream.headers.first(name: "content-type") == "application/x-ndjson")
       #expect(stream.headers.first(name: "x-content-type-options") == "nosniff")
-      try await Task.sleep(for: .milliseconds(300))
       try FileManager.default.createDirectory(
         atPath: fs.fixture.folder + "/watched", withIntermediateDirectories: true)
       try fs.fixture.write(fs.fixture.folder + "/watched/a.txt", "a")
