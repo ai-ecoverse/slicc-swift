@@ -18,7 +18,7 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-log", from: "1.15.1"),
     .package(url: "https://github.com/apple/swift-nio", from: "2.103.0"),
     .package(url: "https://github.com/apple/swift-nio-extras", from: "1.35.1"),
-    .package(url: "https://github.com/swift-server/swift-service-lifecycle", from: "2.12.0"),
+    .package(url: "https://github.com/swift-server/swift-service-lifecycle", from: "2.12.1"),
   ],
   targets: [
     .target(
