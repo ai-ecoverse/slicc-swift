@@ -16,7 +16,7 @@
     "release": "semantic-release"
   },
   "devDependencies": {
-    "@ai-ecoverse/slicc-shared-web": "1.15.1",
+    "@ai-ecoverse/slicc-shared-web": "1.16.0",
     "semantic-release": "25.0.9"
   }
 }
