@@ -189,6 +189,9 @@ func temporaryDirectory() throws -> String {
   @Test func rotateKeyAndEphemeralAreAcceptedAndChangeNothing() async throws {
     let config = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(atPath: config) }
+    try FileManager.default.createDirectory(
+      atPath: config + "/slicc-swift", withIntermediateDirectories: true)
+    try Data("fake-value-0001\n".utf8).write(to: URL(fileURLWithPath: config + "/slicc-swift/key"))
     let port = String(try await freePort())
     let flagged = try await launch(["--port", port, "--rotate-key", "--ephemeral"], config: config)
     await flagged.stop()
