@@ -8,7 +8,7 @@ SLICC's local proxy for macOS and iOS: the Swift twin of [slicc-node](https://gi
 swift run slicc-swift
 ```
 
-It starts the proxy on `127.0.0.1:17117` (never another interface) with its proxy key, prints the proxy URL and the launch URL, and opens the launch URL in the default browser. The key and port stay the same when it starts again, after an update, a crash or a reboot, so an open SLICC page reconnects without a new launch URL (see [Restarts](#restarts)):
+It starts the proxy on `127.0.0.1:17117` (never another interface) with a fresh proxy key, prints the proxy URL and the launch URL, and opens the launch URL in the default browser. Every launch mints a new key and keeps it in memory only, so the key lives only as long as the launcher (see [Restarts](#restarts)):
 
 ```
 https://seven.sliccy.ai/#proxy=http%3A%2F%2F127.0.0.1%3A52731&key=<43-char base64url key>
@@ -16,14 +16,13 @@ https://seven.sliccy.ai/#proxy=http%3A%2F%2F127.0.0.1%3A52731&key=<43-char base6
 
 Options:
 
-- `--port PORT`: default `17117`, or any free port with `--ephemeral`.
+- `--port PORT`: default `17117`.
 - `--page URL`: default `https://seven.sliccy.ai/`.
 - `--mount PATH[:NAME][:ro]`: shares a folder with the page, and can be repeated. See [Host folders](#host-folders).
 - `--kernel-port PORT`: the port on `127.0.0.1` for `http://<port>.kernel.localhost/`, default `80`. See [Kernel services](#kernel-services).
 - `--no-kernel`: does not serve the page's kernel on `<port>.kernel.localhost`.
 - `--cdp URL`: relay `/cdp` to a browser already listening at this HTTP debugging URL, such as `http://127.0.0.1:9222`. See [Browser debugging](#browser-debugging).
-- `--rotate-key`: replaces the stored key, so pages and launch URLs holding the old one stop working.
-- `--ephemeral`: uses a fresh key and any free port, and stores nothing: the key dies with the process.
+- `--rotate-key`, `--ephemeral`: accepted and ignored. Every launch already uses a fresh key and stores nothing.
 - `--no-open`: prints the launch URL without opening a browser.
 - `--quiet`: does not log host folder grants, writes and kernel requests to stderr.
 
@@ -41,7 +40,7 @@ try await proxy.run { proxyURL in
 }
 ```
 
-`LocalProxy` mints a fresh key unless given one; `ProxyIdentity.persistentKey(directory:rotate:warn:)` returns the stored one, creating it if needed, and `ProxyIdentity.configDirectory()` names the directory. `LocalProxy` also takes `portFallback` (listen on any free port when `port` is taken), `kernelPort` (default `80`, `nil` for off), `cdp` (HTTP debugging URL of a browser already running, or `nil` for off) and `warn`. `run(onListening:)` passes the bound kernel port too, or `nil` when the listener is off or could not bind.
+`LocalProxy` mints a fresh key unless given one. `ProxyIdentity.removeStoredKey(directory:warn:)` deletes a key file left by an earlier version from `ProxyIdentity.configDirectory()`. `LocalProxy` also takes `portFallback` (listen on any free port when `port` is taken), `kernelPort` (default `80`, `nil` for off), `cdp` (HTTP debugging URL of a browser already running, or `nil` for off) and `warn`. `run(onListening:)` passes the bound kernel port too, or `nil` when the listener is off or could not bind.
 
 ## Protocol
 
@@ -61,12 +60,12 @@ It's the protocol in [slicc-node's README](https://github.com/ai-ecoverse/slicc-
 
 ## Restarts
 
-This is slicc-node's [restarts](https://github.com/ai-ecoverse/slicc-node#restarts) contract (slicc-node#20). The page stores `{ url, key }` from the launch fragment, and the launcher keeps both valid across restarts, so the page reconnects on its own: network through the same proxy, host folders by asking for new tokens, and the kernel tunnel with the same key.
+The key lives only as long as the launcher. Each launch mints a new one (32 random bytes, base64url) and keeps it in memory only, so a page holding the key of an earlier launch is refused with `403 proxy key missing or wrong` and needs the new launch URL.
 
-- **Key file.** The key lives in `key` in the config directory: `$XDG_CONFIG_HOME/slicc-swift` when that is set, else `~/Library/Application Support/slicc-swift` on macOS and the app's Application Support directory on iOS. It is created on first run, mode `0600` in a `0700` directory, and published whole (written aside, then linked in), so two first starts at once agree on one key. A file or directory open to others is set back to `0600` or `0700` with a warning. A file without a key gets a new one, also with a warning. The key is the same format as before: 32 random bytes, base64url. It is slicc-swift's own and is not shared with slicc-node, so a page that switches from one proxy to the other needs the new launch URL once.
+- **No key file.** The launcher never reads or writes a key file. At startup it deletes `key` from the config directory if an earlier version left one there: `$XDG_CONFIG_HOME/slicc-swift` when that is set, else `~/Library/Application Support/slicc-swift` on macOS and the app's Application Support directory on iOS.
 - **Port.** The default is `17117`, the same as slicc-node's. If it is taken, for example by a running slicc-node, the launcher warns `port 17117 is taken; using a free port, so pages from an earlier launch cannot reconnect` and takes any free port. A port given with `--port` that is taken stops the launcher with exit code `1`.
 - **Host folders** are only as persistent as the command line: pass the same `--mount` options again, and the kernel's driver re-grants each folder by name when its old token answers `403`. Tokens never survive a restart.
-- `--rotate-key` writes a new key. `--ephemeral` keeps the old behaviour: a fresh key, any free port, nothing stored. Both together exit with code `2`.
+- `--rotate-key` and `--ephemeral` are accepted and do nothing, alone or together.
 
 ## Security gate
 
@@ -212,7 +211,7 @@ The browser already speaks flattened sessions (`Target.attachToTarget` with `fla
 
 ## Development
 
-`npm run lint` runs the slicc lint tools and `swift format lint`. `swift test` runs the integration tests, which start a loopback upstream and the proxy and cover the protocol, the gate, host folders (traversal and symlink escapes, read-only tokens, foreign origins, token expiry, in-place writes and the watch stream) restarts (the stored key and its permissions, `--rotate-key`, `--ephemeral`, the port fallback and two first starts at once, against the built launcher), kernel services (the `Host` allowlist, the tunnel gate, forwarded HTTP and WebSocket exchanges, credits and backpressure, resets, protocol violations and several tabs, against a simulated page) and `/cdp` (the origin and key gate, `webSocketDebuggerUrl` parsing, flattened text frames and upstream reconnect, against a simulated Chrome). Releases are GitHub tags only, via semantic-release.
+`npm run lint` runs the slicc lint tools and `swift format lint`. `swift test` runs the integration tests, which start a loopback upstream and the proxy and cover the protocol, the gate, host folders (traversal and symlink escapes, read-only tokens, foreign origins, token expiry, in-place writes and the watch stream) restarts (a fresh key on every launch, the old key refused, no key file, the ignored `--rotate-key` and `--ephemeral`, and the port fallback, against the built launcher), kernel services (the `Host` allowlist, the tunnel gate, forwarded HTTP and WebSocket exchanges, credits and backpressure, resets, protocol violations and several tabs, against a simulated page) and `/cdp` (the origin and key gate, `webSocketDebuggerUrl` parsing, flattened text frames and upstream reconnect, against a simulated Chrome). Releases are GitHub tags only, via semantic-release.
 
 ## What else is in SLICC's Swift code
 

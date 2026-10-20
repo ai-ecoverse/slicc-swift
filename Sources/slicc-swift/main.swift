@@ -10,13 +10,14 @@ struct LauncherOptions {
   var kernelPort = KernelProtocol.defaultPort
   var kernel = true
   var cdp: String?
-  var rotateKey = false
-  var ephemeral = false
 
   static let usage = """
     usage: slicc-swift [--port PORT] [--page URL] [--mount PATH[:NAME][:ro]]...
                        [--kernel-port PORT] [--no-kernel] [--cdp URL]
-                       [--rotate-key] [--ephemeral] [--no-open] [--quiet]
+                       [--no-open] [--quiet]
+
+    Every launch mints a fresh proxy key and keeps it in memory only.
+    --rotate-key and --ephemeral are accepted and do nothing.
     """
 
   init(_ arguments: [String]) throws {
@@ -37,8 +38,7 @@ struct LauncherOptions {
         kernelPort = parsed
       case "--no-kernel": kernel = false
       case "--cdp": cdp = try Self.value(argument, &rest)
-      case "--rotate-key": rotateKey = true
-      case "--ephemeral": ephemeral = true
+      case "--rotate-key", "--ephemeral": break
       case "--no-open": open = false
       case "--quiet": quiet = true
       case "--help", "-h": throw LauncherError.help
@@ -89,21 +89,8 @@ func fail(_ message: String) -> Never {
   exit(1)
 }
 
-if options.ephemeral && options.rotateKey {
-  logLine("--ephemeral stores no key, so there is none to rotate")
-  exit(2)
-}
-
-let persistent = !options.ephemeral
-let key: String
-do {
-  key =
-    persistent
-    ? try ProxyIdentity.persistentKey(rotate: options.rotateKey, warn: logLine)
-    : ProxySecurity.mintKey()
-} catch {
-  fail("\(error)")
-}
+ProxyIdentity.removeStoredKey(warn: logLine)
+let key = ProxySecurity.mintKey()
 let folders = HostFolder.load(options.mounts, warn: logLine)
 let cdpURL: String?
 do {
@@ -112,8 +99,8 @@ do {
   fail("\(error)")
 }
 let proxy = LocalProxy(
-  port: options.port ?? (persistent ? ProxyIdentity.defaultPort : 0),
-  portFallback: persistent && options.port == nil, key: key, folders: folders,
+  port: options.port ?? ProxyIdentity.defaultPort,
+  portFallback: options.port == nil, key: key, folders: folders,
   kernelPort: options.kernel ? options.kernelPort : nil, cdp: cdpURL,
   log: options.quiet ? quietLine : logLine, warn: logLine)
 do {

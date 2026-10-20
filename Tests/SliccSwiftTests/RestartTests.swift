@@ -38,16 +38,15 @@ final class Launched: Sendable {
   }
 }
 
-func launch(_ arguments: [String], config: String?) async throws -> Launched {
+func launch(_ arguments: [String], config: String) async throws -> Launched {
   let binary = Bundle(for: BundleMarker.self).bundleURL.deletingLastPathComponent()
     .appendingPathComponent("slicc-swift")
   let process = Process()
   process.executableURL = binary
   let kernel = arguments.contains { $0.hasPrefix("--kernel") } ? [] : ["--no-kernel"]
-  let identity = config == nil ? ["--ephemeral"] : []
-  process.arguments = ["--no-open"] + kernel + identity + arguments
+  process.arguments = ["--no-open"] + kernel + arguments
   var environment = ProcessInfo.processInfo.environment
-  if let config { environment["XDG_CONFIG_HOME"] = config }
+  environment["XDG_CONFIG_HOME"] = config
   process.environment = environment
   let output = Pipe()
   let error = Pipe()
@@ -93,14 +92,6 @@ func temporaryDirectory() throws -> String {
   return try HostfsFileSystem.realPath(String(cString: made))
 }
 
-func permissions(_ path: String) throws -> Int {
-  (try FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? Int) ?? -1
-}
-
-func readText(_ path: String) throws -> String {
-  try String(contentsOfFile: path, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-}
-
 @Suite(.serialized) struct RestartTests {
   func call(
     _ client: HTTPClient, _ url: String, _ path: String, headers: [(String, String)],
@@ -140,7 +131,7 @@ func readText(_ path: String) throws -> String {
     ).0
   }
 
-  @Test func aRestartedProxyKeepsItsKeyAndPortSoThePageReconnects() async throws {
+  @Test func everyLaunchMintsAFreshKeyAndTheOldOneIsRefused() async throws {
     let base = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(atPath: base) }
     let config = base + "/config"
@@ -154,72 +145,53 @@ func readText(_ path: String) throws -> String {
       let (granted, token) = try await grant(harness, first.url, first.key)
       #expect(granted == 200)
       let old = try #require(token)
-      #expect(try await stat(harness, first.url, old) == 200)
       await first.stop()
+      #expect(!FileManager.default.fileExists(atPath: config + "/slicc-swift/key"))
 
       let second = try await launch(arguments, config: config)
       #expect(second.url == first.url)
-      #expect(second.key == first.key)
-      #expect(try await fetched(harness, first.url, first.key) == "hello")
-      #expect(try await stat(harness, first.url, old) == 403)
-      let (regranted, fresh) = try await grant(harness, first.url, first.key)
-      #expect(regranted == 200)
-      #expect(try await stat(harness, first.url, try #require(fresh)) == 200)
+      #expect(second.key != first.key)
+      #expect(ProxyIdentity.isKey(first.key))
+      #expect(ProxyIdentity.isKey(second.key))
+      #expect(try await fetched(harness, second.url, first.key) == "403")
+      #expect(try await grant(harness, second.url, first.key).0 == 403)
+      #expect(try await stat(harness, second.url, old) == 403)
+      #expect(try await fetched(harness, second.url, second.key) == "hello")
       await second.stop()
-
-      let directory = config + "/slicc-swift"
-      #expect(try readText(directory + "/key") == first.key)
-      #expect(try permissions(directory + "/key") == 0o600)
-      #expect(try permissions(directory) == 0o700)
+      #expect(!FileManager.default.fileExists(atPath: config + "/slicc-swift/key"))
     }
   }
 
-  @Test func rotateKeyReplacesTheKeyAndEphemeralLeavesItAlone() async throws {
-    let config = try temporaryDirectory()
-    defer { try? FileManager.default.removeItem(atPath: config) }
-    let port = String(try await freePort())
-    let kept = try await launch(["--port", port], config: config)
-    await kept.stop()
-    let rotated = try await launch(["--port", port, "--rotate-key"], config: config)
-    await rotated.stop()
-    #expect(rotated.key != kept.key)
-    #expect(ProxyIdentity.isKey(rotated.key))
-    let file = config + "/slicc-swift/key"
-    #expect(try readText(file) == rotated.key)
-    let ephemeral = try await launch(["--ephemeral"], config: config)
-    await ephemeral.stop()
-    #expect(ephemeral.key != rotated.key)
-    #expect(ephemeral.port != ProxyIdentity.defaultPort)
-    #expect(try readText(file) == rotated.key)
-  }
-
-  @Test func aBrokenOrLooseKeyFileIsRepaired() async throws {
+  @Test func anOldKeyFileIsDeletedAndNotUsed() async throws {
     let config = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(atPath: config) }
     let directory = config + "/slicc-swift"
     let file = directory + "/key"
+    let stored = String(repeating: "a", count: 43)
     try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-    try Data("not a key\n".utf8).write(to: URL(fileURLWithPath: file))
+    try Data("\(stored)\n".utf8).write(to: URL(fileURLWithPath: file))
+    try await withHarness { harness in
+      let launched = try await launch(["--port", String(try await freePort())], config: config)
+      #expect(!FileManager.default.fileExists(atPath: file))
+      #expect(launched.key != stored)
+      #expect(try await fetched(harness, launched.url, stored) == "403")
+      await launched.stop()
+    }
+    #expect(!FileManager.default.fileExists(atPath: file))
+  }
+
+  @Test func rotateKeyAndEphemeralAreAcceptedAndChangeNothing() async throws {
+    let config = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(atPath: config) }
     let port = String(try await freePort())
-    let fresh = try await launch(["--port", port], config: config)
-    await fresh.stop()
-    #expect(fresh.stderr.contains("does not hold a proxy key; minting a new one"))
-    #expect(try readText(file) == fresh.key)
-    chmod(file, 0o644)
-    chmod(directory, 0o777)
-    let tightened = try await launch(["--port", port], config: config)
-    await tightened.stop()
-    #expect(tightened.key == fresh.key)
-    #expect(tightened.stderr.contains("\(file) was readable by others; it is 0600 now"))
-    #expect(tightened.stderr.contains("\(directory) was open to others; it is 0700 now"))
-    #expect(try permissions(file) == 0o600)
-    #expect(try permissions(directory) == 0o700)
-    chmod(directory, 0o500)
-    let owner = try await launch(["--port", port], config: config)
-    await owner.stop()
-    #expect(owner.key == fresh.key)
-    #expect(!owner.stderr.contains("was open to others"))
-    #expect(try permissions(directory) == 0o700)
+    let flagged = try await launch(["--port", port, "--rotate-key", "--ephemeral"], config: config)
+    await flagged.stop()
+    let plain = try await launch(["--port", port], config: config)
+    await plain.stop()
+    #expect(flagged.port == plain.port)
+    #expect(flagged.key != plain.key)
+    #expect(ProxyIdentity.isKey(flagged.key))
+    #expect(try FileManager.default.contentsOfDirectory(atPath: config).isEmpty)
   }
 
   @Test func theDefaultPortIsFixedWithAFreePortAsFallback() async throws {
@@ -254,27 +226,7 @@ func readText(_ path: String) throws -> String {
       #expect(failure.status == 1)
       #expect(failure.stderr.contains("EADDRINUSE"))
     }
-    do {
-      _ = try await launch(["--ephemeral", "--rotate-key"], config: config)
-      Issue.record("--ephemeral with --rotate-key should stop the launcher")
-    } catch let failure as LaunchFailure {
-      #expect(failure.status == 2)
-    }
     try await blocker.close()
-  }
-
-  @Test func twoFirstStartsAtOnceAgreeOnOneStoredKey() async throws {
-    let config = try temporaryDirectory()
-    defer { try? FileManager.default.removeItem(atPath: config) }
-    let ports = [try await freePort(), try await freePort()]
-    async let one = launch(["--port", String(ports[0])], config: config)
-    async let two = launch(["--port", String(ports[1])], config: config)
-    let (first, second) = try await (one, two)
-    await first.stop()
-    await second.stop()
-    #expect(first.key == second.key)
-    #expect(try readText(config + "/slicc-swift/key") == first.key)
-    #expect(try FileManager.default.contentsOfDirectory(atPath: config + "/slicc-swift") == ["key"])
   }
 
   @Test func theConfigDirectoryFollowsXDGAndThePlatform() {
