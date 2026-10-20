@@ -47,6 +47,10 @@ public enum ProxyIdentity {
       guard code != ENOENT else { continue }
       warn("cannot remove \(file): \(String(cString: strerror(code)))")
     }
+    guard !stale.isEmpty,
+      (try? FileManager.default.contentsOfDirectory(atPath: directory.path))?.isEmpty == true
+    else { return }
+    rmdir(directory.path)
   }
 
   static func isKey(_ text: String) -> Bool {

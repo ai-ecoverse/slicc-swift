@@ -40,7 +40,7 @@ try await proxy.run { proxyURL in
 }
 ```
 
-`LocalProxy` mints a fresh key unless given one. `ProxyIdentity.removeStoredKey(directory:warn:)` deletes a key file, and any `key.*.tmp` file, left by an earlier version in `ProxyIdentity.configDirectory()`. `ProxyIdentity.persistentKey(directory:rotate:warn:)` is deprecated: it does the same cleanup and returns a fresh key. `LocalProxy` also takes `portFallback` (listen on any free port when `port` is taken), `kernelPort` (default `80`, `nil` for off), `cdp` (HTTP debugging URL of a browser already running, or `nil` for off) and `warn`. `run(onListening:)` passes the bound kernel port too, or `nil` when the listener is off or could not bind.
+`LocalProxy` mints a fresh key unless given one. `ProxyIdentity.removeStoredKey(directory:warn:)` deletes a key file, and any `key.*.tmp` file, left by an earlier version in `ProxyIdentity.configDirectory()`, and then the directory if it is empty. `ProxyIdentity.persistentKey(directory:rotate:warn:)` is deprecated: it does the same cleanup and returns a fresh key. `LocalProxy` also takes `portFallback` (listen on any free port when `port` is taken), `kernelPort` (default `80`, `nil` for off), `cdp` (HTTP debugging URL of a browser already running, or `nil` for off) and `warn`. `run(onListening:)` passes the bound kernel port too, or `nil` when the listener is off or could not bind.
 
 ## Protocol
 
@@ -62,7 +62,7 @@ It's the protocol in [slicc-node's README](https://github.com/ai-ecoverse/slicc-
 
 The key lives only as long as the launcher. Each launch mints a new one (32 random bytes, base64url) and keeps it in memory only, so a page holding the key of an earlier launch is refused with `403 proxy key missing or wrong` and needs the new launch URL.
 
-- **No key file.** The launcher never reads or writes a key file. At startup it deletes `key`, and any `key.*.tmp` file, from the config directory if an earlier version left them there: `$XDG_CONFIG_HOME/slicc-swift` when that is set, else `~/Library/Application Support/slicc-swift` on macOS and the app's Application Support directory on iOS.
+- **No key file.** The launcher never reads or writes a key file. At startup it deletes `key`, and any `key.*.tmp` file, from the config directory if an earlier version left them there, then the directory itself if nothing else is in it: `$XDG_CONFIG_HOME/slicc-swift` when that is set, else `~/Library/Application Support/slicc-swift` on macOS and the app's Application Support directory on iOS.
 - **Port.** The default is `17117`, the same as slicc-node's. If it is taken, for example by a running slicc-node, the launcher warns `port 17117 is taken; using a free port` and takes any free port. A port given with `--port` that is taken stops the launcher with exit code `1`.
 - **Host folders** are only as persistent as the command line: pass the same `--mount` options again, and the kernel's driver re-grants each folder by name when its old token answers `403`. Tokens never survive a restart.
 - `--rotate-key` and `--ephemeral` are accepted and do nothing, alone or together. `--ephemeral` used to pick any free port as well; it now uses the default port too.
