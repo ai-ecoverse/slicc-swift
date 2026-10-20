@@ -139,7 +139,7 @@ public struct LocalProxy: Sendable {
         try await makeApplication(httpClient: httpClient, onReady: onListening).runService()
       } catch  where portFallback && port != 0 && Self.addressInUse(error) {
         warn(
-          "port \(port) is taken; using a free port, so pages from an earlier launch cannot reconnect"
+          "port \(port) is taken; using a free port"
         )
         var fallback = self
         fallback.port = 0
