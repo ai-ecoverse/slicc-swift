@@ -4,6 +4,10 @@ public enum ProxyIdentity {
   public static let defaultPort = 17117
   static let name = "slicc-swift"
 
+  public struct Failure: Error, CustomStringConvertible {
+    public let description: String
+  }
+
   public static func configDirectory(
     environment: [String: String] = ProcessInfo.processInfo.environment
   ) -> URL {
@@ -22,14 +26,27 @@ public enum ProxyIdentity {
     #endif
   }
 
+  @available(*, deprecated, message: "every launch mints a fresh key; nothing is stored")
+  public static func persistentKey(
+    directory: URL = configDirectory(), rotate: Bool = false,
+    warn: (String) -> Void = { _ in }
+  ) throws -> String {
+    removeStoredKey(directory: directory, warn: warn)
+    return ProxySecurity.mintKey()
+  }
+
   public static func removeStoredKey(
     directory: URL = configDirectory(), warn: (String) -> Void = { _ in }
   ) {
-    let file = directory.appendingPathComponent("key").path
-    guard unlink(file) != 0 else { return }
-    let code = errno
-    guard code != ENOENT else { return }
-    warn("cannot remove \(file): \(String(cString: strerror(code)))")
+    let entries = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+    let stale = entries.filter { $0 == "key" || ($0.hasPrefix("key.") && $0.hasSuffix(".tmp")) }
+    for entry in stale {
+      let file = directory.appendingPathComponent(entry).path
+      guard unlink(file) != 0 else { continue }
+      let code = errno
+      guard code != ENOENT else { continue }
+      warn("cannot remove \(file): \(String(cString: strerror(code)))")
+    }
   }
 
   static func isKey(_ text: String) -> Bool {

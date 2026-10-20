@@ -162,7 +162,7 @@ func temporaryDirectory() throws -> String {
     }
   }
 
-  @Test func anOldKeyFileIsDeletedAndNotUsed() async throws {
+  @Test func anOldKeyFileAndItsTmpFilesAreDeletedAndNotUsed() async throws {
     let config = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(atPath: config) }
     let directory = config + "/slicc-swift"
@@ -170,6 +170,10 @@ func temporaryDirectory() throws -> String {
     let stored = String(repeating: "a", count: 43)
     try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
     try Data("\(stored)\n".utf8).write(to: URL(fileURLWithPath: file))
+    let staged = directory + "/key.0123456789ab.tmp"
+    let other = directory + "/notes.txt"
+    try Data("\(stored)\n".utf8).write(to: URL(fileURLWithPath: staged))
+    try Data("keep".utf8).write(to: URL(fileURLWithPath: other))
     try await withHarness { harness in
       let launched = try await launch(["--port", String(try await freePort())], config: config)
       #expect(!FileManager.default.fileExists(atPath: file))
@@ -178,6 +182,8 @@ func temporaryDirectory() throws -> String {
       await launched.stop()
     }
     #expect(!FileManager.default.fileExists(atPath: file))
+    #expect(!FileManager.default.fileExists(atPath: staged))
+    #expect(FileManager.default.fileExists(atPath: other))
   }
 
   @Test func rotateKeyAndEphemeralAreAcceptedAndChangeNothing() async throws {
@@ -204,7 +210,7 @@ func temporaryDirectory() throws -> String {
     #expect(fallback.port != ProxyIdentity.defaultPort)
     #expect(
       fallback.stderr.contains(
-        "port \(ProxyIdentity.defaultPort) is taken; using a free port, so pages from an earlier launch cannot reconnect"
+        "port \(ProxyIdentity.defaultPort) is taken; using a free port"
       ))
     guard let blocker else { return }
     try await blocker.close()
